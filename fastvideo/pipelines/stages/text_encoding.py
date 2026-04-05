@@ -66,6 +66,8 @@ class TextEncodingStage(PipelineStage):
             fastvideo_args,
             encoder_index=all_indices,
             return_attention_mask=True,
+            truncation=True,
+            padding=True
         )
         if self._last_audio_embeds is not None:
             batch.extra["ltx2_audio_prompt_embeds"] = self._last_audio_embeds

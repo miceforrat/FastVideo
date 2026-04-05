@@ -29,7 +29,7 @@ method:
   real_score_guidance_scale: 4.5
   dmd_denoising_steps: [1000, 750, 500, 250]
 
-  chunk_size: 3
+  chunk_size: 1
   student_sample_type: sde
   context_noise: 0.0
   enable_gradient_in_rollout: true

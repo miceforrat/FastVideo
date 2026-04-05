@@ -1,21 +1,21 @@
 #!/bin/bash
 
-GPU_NUM=2 # 2,4,8
+GPU_NUM=8 # 2,4,8
 MODEL_PATH="Wan-AI/Wan2.1-T2V-1.3B-Diffusers"
 DATASET_PATH="data/crush-smol/"
 OUTPUT_DIR="data/crush-smol_processed_t2v/"
-
+#     --preprocess.video_loader_type torchvision \
 torchrun --nproc_per_node=$GPU_NUM \
     --master_port=29513 \
     -m fastvideo.pipelines.preprocess.v1_preprocessing_new \
     --model_path $MODEL_PATH \
     --mode preprocess \
     --workload_type t2v \
-    --preprocess.video_loader_type torchvision \
+    --preprocess.video_loader_type torchcodec \
     --preprocess.dataset_type merged \
     --preprocess.dataset_path $DATASET_PATH \
     --preprocess.dataset_output_dir $OUTPUT_DIR \
-    --preprocess.preprocess_video_batch_size 2 \
+    --preprocess.preprocess_video_batch_size 1 \
     --preprocess.dataloader_num_workers 0 \
     --preprocess.max_height 480 \
     --preprocess.max_width 832 \

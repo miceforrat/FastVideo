@@ -59,7 +59,8 @@ training:
     num_latent_t: 20
     num_height: 448
     num_width: 832
-    num_frames: 77
+    num_frames: 40
+    # num_frames: 77
 
   optimizer:
     learning_rate: 1e-5
