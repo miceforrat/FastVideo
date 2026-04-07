@@ -56,10 +56,10 @@ RUN source $HOME/.local/bin/env && \
     echo 'if [ -n "$ZSH_VERSION" ] && [ -f ~/.zshrc ]; then . ~/.zshrc; elif [ -f ~/.bashrc ]; then . ~/.bashrc; fi' > /root/.profile
 
 # Install FastVideo Unified Kernel
-RUN source $HOME/.local/bin/env && \
-    source /opt/venv/bin/activate && \
-    cd fastvideo-kernel && \
-    git submodule update --init --recursive && \
-    MAX_JOBS=8 ./build.sh
+# RUN source $HOME/.local/bin/env && \
+#     source /opt/venv/bin/activate && \
+#     cd fastvideo-kernel && \
+#     git submodule update --init --recursive && \
+#     MAX_JOBS=8 ./build.sh
 
 EXPOSE 22
