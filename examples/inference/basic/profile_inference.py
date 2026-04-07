@@ -41,15 +41,35 @@ PROMPTS = [
 ]
 
 
-def get_memory_info() -> dict[str, float]:
-    """Get current GPU memory info in GB."""
-    torch.cuda.synchronize()
-    allocated = torch.cuda.memory_allocated() / (1024**3)
-    reserved = torch.cuda.memory_reserved() / (1024**3)
-    return {
-        "allocated_gb": allocated,
-        "reserved_gb": reserved,
-    }
+def get_detailed_memory_info() -> dict[str, float]:
+    """Get detailed GPU memory info with error handling."""
+    if not torch.cuda.is_available():
+        return {
+            "allocated_gb": 0.0,
+            "reserved_gb": 0.0,
+            "max_allocated_gb": 0.0,
+            "cuda_available": False
+        }
+    
+    try:
+        torch.cuda.synchronize()
+        allocated = torch.cuda.memory_allocated() / (1024**3)
+        reserved = torch.cuda.memory_reserved() / (1024**3)
+        max_allocated = torch.cuda.max_memory_allocated() / (1024**3)
+        return {
+            "allocated_gb": allocated,
+            "reserved_gb": reserved,
+            "max_allocated_gb": max_allocated,
+            "cuda_available": True
+        }
+    except Exception as e:
+        print(f"Error getting CUDA memory: {e}")
+        return {
+            "allocated_gb": 0.0,
+            "reserved_gb": 0.0,
+            "max_allocated_gb": 0.0,
+            "cuda_available": False
+        }
 
 
 def print_memory_header(label: str):
@@ -61,8 +81,20 @@ def print_memory_header(label: str):
 
 def print_memory_info(label: str, info: dict[str, float]):
     """Print formatted memory info."""
-    print(f"{label:40s} Allocated: {info['allocated_gb']:6.2f} GB | "
-          f"Reserved: {info['reserved_gb']:6.2f} GB")
+    if not info.get("cuda_available", True):
+        print(f"{label:40s} CUDA not available - memory info N/A")
+        return
+    
+    allocated = info.get("allocated_gb", 0.0)
+    reserved = info.get("reserved_gb", 0.0)
+    max_allocated = info.get("max_allocated_gb", 0.0)
+    
+    if max_allocated > 0:
+        print(f"{label:40s} Allocated: {allocated:6.2f} GB | "
+              f"Reserved: {reserved:6.2f} GB | Max: {max_allocated:6.2f} GB")
+    else:
+        print(f"{label:40s} Allocated: {allocated:6.2f} GB | "
+              f"Reserved: {reserved:6.2f} GB")
 
 
 def estimate_kv_cache_size(
@@ -149,10 +181,22 @@ def register_kv_cache_hook(model) -> dict:
                 cache_stats["captured"] = True
     
     # Try to find and hook the transformer's forward method
+    # Look for transformer/DiT modules in the pipeline
+    hooked = False
     for name, module in model.named_modules():
-        if "transformer" in name.lower() or "dit" in name.lower():
-            module.register_forward_hook(hook_fn)
-            break
+        # Look for transformer or DiT modules
+        if any(keyword in name.lower() for keyword in ["transformer", "dit", "ditmodel"]):
+            try:
+                module.register_forward_hook(hook_fn)
+                hooked = True
+                print(f"Debug: Successfully hooked module: {name}")
+                break
+            except Exception as e:
+                print(f"Debug: Failed to hook {name}: {e}")
+                continue
+    
+    if not hooked:
+        print("Debug: No suitable transformer module found for hooking")
     
     return cache_stats
 
@@ -170,6 +214,23 @@ def profile_inference(
         disable_cpu_offload: If True, don't use CPU offloading (requires more GPU memory)
     """
     
+    # ===== CUDA Environment Check =====
+    print(f"\n{'*'*70}")
+    print(f"CUDA Environment Check")
+    print(f"{'*'*70}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"CUDA device count: {torch.cuda.device_count() if torch.cuda.is_available() else 0}")
+    
+    if torch.cuda.is_available():
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        device_props = torch.cuda.get_device_properties(0)
+        print(f"GPU: {device_props.name}")
+        print(f"Total GPU memory: {device_props.total_memory / (1024**3):.1f} GB")
+    else:
+        print("Warning: CUDA not available - memory measurements will be 0")
+    print(f"PyTorch version: {torch.__version__}")
+    print(f"{'*'*70}\n")
+    
     print(f"\n{'*'*70}")
     print(f"FastVideo Inference Profiling")
     print(f"{'*'*70}")
@@ -180,7 +241,7 @@ def profile_inference(
     # ===== Model Loading =====
     print_memory_header("MODEL LOADING PHASE")
     
-    initial_mem = get_memory_info()
+    initial_mem = get_detailed_memory_info()
     print_memory_info("Before loading", initial_mem)
     
     start_load = time.perf_counter()
@@ -196,11 +257,14 @@ def profile_inference(
     )
     
     load_time = time.perf_counter() - start_load
-    loaded_mem = get_memory_info()
+    loaded_mem = get_detailed_memory_info()
     
     print_memory_info("After loading ", loaded_mem)
     print(f"\n{'Model loading time':<40s} {load_time:>8.2f} seconds")
-    print(f"{'GPU memory increase':<40s} {loaded_mem['allocated_gb'] - initial_mem['allocated_gb']:>8.2f} GB")
+    if loaded_mem["cuda_available"]:
+        print(f"{'GPU memory increase':<40s} {loaded_mem['allocated_gb'] - initial_mem['allocated_gb']:>8.2f} GB")
+    else:
+        print(f"{'GPU memory increase':<40s} N/A (CUDA not available)")
     
     # ===== Register KV Cache Hook =====
     # Try to hook into the executor to capture real KV cache sizes
@@ -231,8 +295,12 @@ def profile_inference(
         torch.cuda.empty_cache()
         
         print("\nMemory before generation:")
-        pre_gen_mem = get_memory_info()
+        pre_gen_mem = get_detailed_memory_info()
         print_memory_info("  ", pre_gen_mem)
+        
+        # Reset peak memory tracking
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         
         # Generate video
         start_gen = time.perf_counter()
@@ -243,18 +311,23 @@ def profile_inference(
         )
         gen_time = time.perf_counter() - start_gen
         
-        # Get peak memory and current memory
-        peak_memory_gb = torch.cuda.max_memory_allocated() / (1024**3)
-        post_gen_mem = get_memory_info()
+        # Get peak memory and current memory immediately after generation
+        torch.cuda.synchronize()  # Ensure all operations are complete
+        peak_memory_gb = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
+        post_gen_mem = get_detailed_memory_info()
         
         generation_times.append(gen_time)
         peak_memories.append(peak_memory_gb)
         
         print(f"\nGeneration results:")
         print(f"  Latency:          {gen_time:>8.2f} seconds")
-        print(f"  Peak GPU memory:  {peak_memory_gb:>8.2f} GB")
-        print(f"  Current memory:   {post_gen_mem['allocated_gb']:>8.2f} GB (allocated) | "
-              f"{post_gen_mem['reserved_gb']:>8.2f} GB (reserved)")
+        if post_gen_mem["cuda_available"]:
+            print(f"  Peak GPU memory:  {peak_memory_gb:>8.2f} GB")
+            print(f"  Current memory:   {post_gen_mem['allocated_gb']:>8.2f} GB (allocated) | "
+                  f"{post_gen_mem['reserved_gb']:>8.2f} GB (reserved)")
+        else:
+            print(f"  Peak GPU memory:  N/A (CUDA not available)")
+            print(f"  Current memory:   N/A (CUDA not available)")
         
         # Estimate and display KV cache size
         # Note: This is an estimate; actual values depend on model config
@@ -290,12 +363,19 @@ def profile_inference(
     print(f"  Max:                     {max_gen_time:>8.2f} seconds")
     
     print(f"\nMemory Statistics:")
-    print(f"  Average peak GPU usage:  {avg_peak_mem:>8.2f} GB")
-    print(f"  Max peak GPU usage:      {max_peak_mem:>8.2f} GB")
+    if torch.cuda.is_available():
+        print(f"  Average peak GPU usage:  {avg_peak_mem:>8.2f} GB")
+        print(f"  Max peak GPU usage:      {max_peak_mem:>8.2f} GB")
+    else:
+        print(f"  Average peak GPU usage:  N/A (CUDA not available)")
+        print(f"  Max peak GPU usage:      N/A (CUDA not available)")
     
     print(f"\nModel Loading:")
     print(f"  Load time:               {load_time:>8.2f} seconds")
-    print(f"  Model footprint:         {loaded_mem['allocated_gb']:>8.2f} GB")
+    if loaded_mem["cuda_available"]:
+        print(f"  Model footprint:         {loaded_mem['allocated_gb']:>8.2f} GB")
+    else:
+        print(f"  Model footprint:         N/A (CUDA not available)")
     
     print(f"\nKV Cache Monitoring:")
     if cache_stats_list and cache_stats_list[0].get("captured"):
@@ -336,5 +416,38 @@ def main():
     )
 
 
+def test_cuda_environment():
+    """Test CUDA environment and print diagnostic info."""
+    print("CUDA Environment Diagnostics:")
+    print(f"  torch.cuda.is_available(): {torch.cuda.is_available()}")
+    print(f"  torch.cuda.device_count(): {torch.cuda.device_count()}")
+    
+    if torch.cuda.is_available():
+        try:
+            device = torch.cuda.current_device()
+            print(f"  torch.cuda.current_device(): {device}")
+            props = torch.cuda.get_device_properties(device)
+            print(f"  GPU Name: {props.name}")
+            print(f"  Total Memory: {props.total_memory / (1024**3):.1f} GB")
+            
+            # Test memory allocation
+            test_tensor = torch.randn(1000, 1000).cuda()
+            print(f"  Test allocation successful: {test_tensor.shape}")
+            allocated = torch.cuda.memory_allocated() / (1024**2)
+            print(f"  Memory allocated after test: {allocated:.1f} MB")
+            del test_tensor
+            torch.cuda.empty_cache()
+            
+        except Exception as e:
+            print(f"  CUDA test failed: {e}")
+    else:
+        print("  CUDA not available - check your PyTorch installation")
+    
+    print()
+
+
 if __name__ == "__main__":
+    # Run CUDA diagnostics first
+    test_cuda_environment()
+    
     main()
