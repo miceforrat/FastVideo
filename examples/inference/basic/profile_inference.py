@@ -67,8 +67,8 @@ def print_memory_info(label: str, info: dict[str, float]):
 
 def estimate_kv_cache_size(
     num_frames: int,
-    num_heads: int = 32,
-    head_dim: int = 64,
+    num_heads: int = 12,
+    head_dim: int = 128,
     dtype: torch.dtype = torch.float32,
 ) -> tuple[float, dict]:
     """Estimate KV cache size for a video generation.
@@ -259,12 +259,12 @@ def profile_inference(
         # Estimate and display KV cache size
         # Note: This is an estimate; actual values depend on model config
         num_frames = 45  # typical for Wan2.1-T2V
-        kv_cache_bytes, kv_estimates = estimate_kv_cache_size(num_frames)
+        # kv_cache_bytes, kv_estimates = estimate_kv_cache_size(num_frames)
         
-        print(f"\nKV Cache (estimated, num_frames={num_frames}):")
-        print(f"  K cache:         {kv_estimates['k_cache_mb']:>8.2f} MB")
-        print(f"  V cache:         {kv_estimates['v_cache_mb']:>8.2f} MB")
-        print(f"  Total estimate:  {kv_estimates['total_mb']:>8.2f} MB")
+        # print(f"\nKV Cache (estimated, num_frames={num_frames}):")
+        # print(f"  K cache:         {kv_estimates['k_cache_mb']:>8.2f} MB")
+        # print(f"  V cache:         {kv_estimates['v_cache_mb']:>8.2f} MB")
+        # print(f"  Total estimate:  {kv_estimates['total_mb']:>8.2f} MB")
         
         # Display actual KV cache size if hook captured it
         if cache_stats_list and cache_stats_list[0].get("captured"):
@@ -272,7 +272,7 @@ def profile_inference(
             num_blocks = cache_stats_list[0].get("num_blocks", 0)
             print(f"\nKV Cache (ACTUAL, measured by hook):")
             print(f"  Total actual:    {actual_cache_mb:>8.2f} MB ({num_blocks} blocks)")
-            print(f"  Estimated vs Actual: {kv_estimates['total_mb']/actual_cache_mb if actual_cache_mb > 0 else 1:.2f}x")
+            # print(f"  Estimated vs Actual: {kv_estimates['total_mb']/actual_cache_mb if actual_cache_mb > 0 else 1:.2f}x")
     
     # ===== Summary =====
     print_memory_header("SUMMARY")
