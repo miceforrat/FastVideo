@@ -497,6 +497,7 @@ class CausalWanTransformer3DModel(BaseDiT):
             rope_dim_list,
             dtype=torch.float32 if current_platform.is_mps() else torch.float64,
             rope_theta=10000,
+            do_sp_sharding=True,
             start_frame=start_frame # Assume that start_frame is 0 when kv_cache is None
         )
         freqs_cos = freqs_cos.to(hidden_states.device)
@@ -505,8 +506,11 @@ class CausalWanTransformer3DModel(BaseDiT):
                      freqs_sin) if freqs_cos is not None else None
 
         hidden_states = self.patch_embedding(hidden_states)
-        grid_sizes = torch.stack(
-            [torch.tensor(hidden_states[0].shape[1:], dtype=torch.long)])
+        # logger.info(f"hs size before grid_sizes: {hidden_states.shape}")
+        # grid_sizes = torch.stack(
+        #     [torch.tensor(hidden_states[0].shape[1:], dtype=torch.long)])
+        grid_size = torch.tensor(hidden_states[0].shape[1:], dtype=torch.long, device=hidden_states.device)
+        grid_sizes = grid_size.unsqueeze(0).repeat(batch_size, 1)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
         encoder_hidden_states = torch.cat([encoder_hidden_states, encoder_hidden_states.new_zeros(1, self.text_len - encoder_hidden_states.size(1), encoder_hidden_states.size(2))], dim=1)

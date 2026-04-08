@@ -1155,3 +1155,29 @@ def _cached_pin_memory_available(pid: int) -> bool:
 
 def is_pin_memory_available() -> bool:
     return _cached_pin_memory_available(os.getpid())
+
+
+def tensor_bytes(obj):
+    import torch
+
+    if obj is None:
+        return 0
+
+    if isinstance(obj, torch.Tensor):
+        return obj.numel() * obj.element_size()
+
+    if isinstance(obj, dict):
+        return sum(tensor_bytes(v) for v in obj.values())
+
+    if isinstance(obj, (list, tuple)):
+        return sum(tensor_bytes(v) for v in obj)
+
+    # 某些 cache 对象可能是自定义类
+    if hasattr(obj, "__dict__"):
+        return sum(tensor_bytes(v) for v in vars(obj).values())
+
+    return 0
+
+
+def bytes_to_mib(n):
+    return n / (1024 ** 2)

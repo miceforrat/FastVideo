@@ -9,6 +9,7 @@ from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
 from fastvideo.pipelines.stages.denoising import DenoisingStage
 from fastvideo.pipelines.stages.validators import StageValidators as V
 from fastvideo.pipelines.stages.validators import VerificationResult
+from fastvideo.utils import tensor_bytes, bytes_to_mib
 
 try:
     from fastvideo.attention.backends.video_sparse_attn import (VideoSparseAttentionBackend)
@@ -196,6 +197,7 @@ class CausalDMDDenosingStage(DenoisingStage):
                         current_model = self.transformer_2
                     else:
                         current_model = self.transformer
+                    # logger.info(f"current model: {current_model}")
                     # Copy for pred conversion
                     noise_latents = noise_latents_btchw.clone()
                     latent_model_input = current_latents.to(target_dtype)
@@ -204,7 +206,8 @@ class CausalDMDDenosingStage(DenoisingStage):
                         latent_model_input = torch.cat([latent_model_input, batch.image_latent.to(target_dtype)], dim=2)
 
                     # Prepare inputs
-                    t_expand = t_cur.repeat(latent_model_input.shape[0])
+                    # t_expand = t_cur.repeat(latent_model_input.shape[0])
+                    t_expand = t_cur.view(1, 1).expand(latent_model_input.shape[0], noise_latents.shape[1])
 
                     # Attention metadata if needed
                     if (vsa_available and self.attn_backend == VideoSparseAttentionBackend):
@@ -254,6 +257,9 @@ class CausalDMDDenosingStage(DenoisingStage):
                             boundary_timestep=torch.ones_like(t_expand) * boundary_timestep,
                             scheduler=self.scheduler).unflatten(0, pred_noise_btchw.shape[:2])
                     else:
+                        # logger.info(f"t_expand shape: {t_expand.shape}")
+                        # logger.info(f"noise_latents shape: {noise_latents.shape}")
+                        # logger.info(f"pred noise shape: {pred_noise_btchw.shape}")
                         pred_video_btchw = pred_noise_to_pred_video(pred_noise=pred_noise_btchw.flatten(0, 1),
                                                                     noise_input_latent=noise_latents.flatten(0, 1),
                                                                     timestep=t_expand,
@@ -334,6 +340,13 @@ class CausalDMDDenosingStage(DenoisingStage):
             latents = latents[:, :, :-num_frames_to_remove, :, :]
 
         batch.latents = latents
+        if fastvideo_args.log_kv_cache_size:
+            logger.info(
+                "[kv-cache][block=%d][after_clean_context] kv_cache_mib=%.2f crossattn_cache_mib=%.2f",
+                start_index // self.num_frames_per_block,
+                bytes_to_mib(tensor_bytes(kv_cache1)),
+                bytes_to_mib(tensor_bytes(crossattn_cache)),
+            )
         return batch
 
     def _initialize_kv_cache(self, batch_size, dtype, device) -> list[dict]:

@@ -184,6 +184,8 @@ class FastVideoArgs:
 
     # MoE parameters used by Wan2.2
     boundary_ratio: float | None = 0.875
+    
+    log_kv_cache_size: bool = False
 
     @property
     def training_mode(self) -> bool:

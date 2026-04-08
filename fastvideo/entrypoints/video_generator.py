@@ -468,6 +468,231 @@ class VideoGenerator:
             "trajectory_decoded": output_batch.trajectory_decoded,
             "video_path": output_path if batch.save_video else None,
             "peak_memory_mb": output_batch.extra.get("peak_memory_mb"),
+            "durations": output_batch.extra.get("durations")
+        }
+
+        return result
+
+    def generate_batches_video(
+        self,
+        batch_size: int,
+        prompt: str | None = None,
+        prompts: list[str] | None = None,
+        sampling_param: SamplingParam | None = None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        """
+        Generate a homogeneous batch for profiling.
+
+        Assumptions:
+        - batch elements are homogeneous
+        - all prompts can be identical
+        - mainly used for profiling / throughput / memory measurement
+        """
+        log_queue = kwargs.pop("log_queue", None)
+        if log_queue:
+            self.executor.set_log_queue(log_queue)
+
+        try:
+            return self._generate_batches_video_impl(
+                batch_size=batch_size,
+                prompt=prompt,
+                prompts=prompts,
+                sampling_param=sampling_param,
+                **kwargs,
+            )
+        finally:
+            if log_queue:
+                self.executor.clear_log_queue()
+
+    def _generate_batches_video_impl(
+        self,
+        batch_size: int,
+        prompt: str | None = None,
+        prompts: list[str] | None = None,
+        sampling_param: SamplingParam | None = None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+
+        if sampling_param is None:
+            sampling_param = SamplingParam.from_pretrained(self.fastvideo_args.model_path)
+
+        sampling_param = deepcopy(sampling_param)
+        sampling_param.update(kwargs)
+
+        # profiling场景下，不建议默认保存视频，避免I/O污染结果
+        # kwargs.setdefault("save_video", False)
+        # sampling_param.save_video = kwargs["save_video"]
+
+        if prompts is None:
+            if prompt is None:
+                raise ValueError("Either `prompt` or `prompts` must be provided")
+            prompt = prompt.strip()
+            prompts = [prompt] * batch_size
+        else:
+            if len(prompts) != batch_size:
+                raise ValueError(
+                    f"len(prompts) ({len(prompts)}) must equal batch_size ({batch_size})"
+                )
+            prompts = [p.strip() for p in prompts]
+
+        return self._generate_batched_video(
+            prompts=prompts,
+            sampling_param=sampling_param,
+            **kwargs,
+        )
+
+    def _generate_batched_video(
+        self,
+        prompts: list[str],
+        sampling_param: SamplingParam | None = None,
+        **kwargs,
+    ) -> dict[str, Any]:
+        fastvideo_args = self.fastvideo_args
+        sampling_param = deepcopy(sampling_param)
+
+        if not prompts:
+            raise ValueError("`prompts` must not be empty")
+        if not all(isinstance(p, str) for p in prompts):
+            raise TypeError("All prompts must be strings")
+
+        batch_size = len(prompts)
+
+        if sampling_param is None:
+            sampling_param = SamplingParam.from_pretrained(self.fastvideo_args.model_path)
+
+        # profiling场景：统一负样本prompt
+        if sampling_param.negative_prompt is not None:
+            sampling_param.negative_prompt = sampling_param.negative_prompt.strip()
+
+        if (
+            sampling_param.height <= 0
+            or sampling_param.width <= 0
+            or sampling_param.num_frames <= 0
+        ):
+            raise ValueError(
+                f"Height, width, and num_frames must be positive integers, got "
+                f"height={sampling_param.height}, width={sampling_param.width}, "
+                f"num_frames={sampling_param.num_frames}"
+            )
+
+        target_height = align_to(sampling_param.height, 16)
+        target_width = align_to(sampling_param.width, 16)
+
+        latents_size = [
+            (sampling_param.num_frames - 1) // 4 + 1,
+            sampling_param.height // 8,
+            sampling_param.width // 8,
+        ]
+        n_tokens = latents_size[0] * latents_size[1] * latents_size[2]
+
+        debug_str = f'''
+                    batch_size: {batch_size}
+                        height: {target_height}
+                        width: {target_width}
+                video_length: {sampling_param.num_frames}
+                first_prompt: {prompts[0]}
+                    image_path: {sampling_param.image_path}
+                    neg_prompt: {sampling_param.negative_prompt}
+                        seed: {sampling_param.seed}
+                    infer_steps: {sampling_param.num_inference_steps}
+        num_videos_per_prompt: {sampling_param.num_videos_per_prompt}
+                guidance_scale: {sampling_param.guidance_scale}
+                    n_tokens: {n_tokens}
+                    flow_shift: {fastvideo_args.pipeline_config.flow_shift}
+        embedded_guidance_scale: {fastvideo_args.pipeline_config.embedded_cfg_scale}
+                    save_video: {sampling_param.save_video}
+        '''
+        logger.info(debug_str)
+
+        batch_dict = shallow_asdict(sampling_param)
+        sampling_param.prompt = prompts
+        batch_dict.update(
+            {
+                "eta": 0.0,
+                "n_tokens": n_tokens,
+                "VSA_sparsity": fastvideo_args.VSA_sparsity,
+                # 关键：把prompt从单字符串改成列表
+                "prompt": prompts,
+                # 可选：显式传个batch size，便于下游使用
+                "batch_size": batch_size,
+            }
+        )
+
+        batch = ForwardBatch(**batch_dict)
+
+        start_time = time.perf_counter()
+
+        result_container = {"output_batch": ForwardBatch(data_type=batch.data_type)}
+        thread_error: dict[str, BaseException | None] = {"error": None}
+        thread_error_traceback: dict[str, str] = {"traceback": ""}
+
+        def execute_forward_thread():
+            import traceback
+            try:
+                result_container["output_batch"] = self.executor.execute_forward(batch, fastvideo_args)
+            except BaseException as error:
+                thread_error["error"] = error
+                thread_error_traceback["traceback"] = traceback.format_exc()
+
+        logger.info("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+        logger.info(f"generator: {batch.generator}")
+        logger.info("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+        thread = threading.Thread(target=execute_forward_thread)
+        thread.start()
+
+        samples = torch.empty(
+            (batch_size, 3, sampling_param.num_frames, sampling_param.height, sampling_param.width),
+            device="cpu",
+            pin_memory=fastvideo_args.pin_cpu_memory,
+        )
+
+        thread.join()
+
+        if thread_error["error"] is not None:
+            raise RuntimeError(
+                "Forward execution thread failed.\n"
+                f"{thread_error_traceback['traceback']}"
+            ) from thread_error["error"]
+
+        output_batch = result_container["output_batch"]
+        if output_batch.output is None:
+            raise RuntimeError(
+                "Forward execution returned no output tensor. "
+                "This usually means the executor/pipeline failed earlier."
+            )
+
+        if output_batch.output.shape == samples.shape:
+            samples.copy_(output_batch.output)
+        else:
+            logger.warning(
+                "Output shape %s does not match expected shape %s; use slow path",
+                output_batch.output.shape,
+                samples.shape,
+            )
+            samples = output_batch.output.cpu()
+
+        logging_info = output_batch.logging_info
+        gen_time = time.perf_counter() - start_time
+        logger.info("Generated batch successfully in %.2f seconds", gen_time)
+
+        # profiling为主，不一定需要逐个转frames；这里只保留原tensor更稳
+        result: dict[str, Any] = {
+            "prompts": prompts,
+            "batch_size": batch_size,
+            "samples": samples if batch.return_frames else None,
+            "frames": None,  # profiling场景通常不需要展开成frames
+            "audio": output_batch.extra.get("audio") if batch.return_frames else None,
+            "size": (target_height, target_width, batch.num_frames),
+            "generation_time": gen_time,
+            "logging_info": logging_info,
+            "trajectory": output_batch.trajectory_latents,
+            "trajectory_timesteps": output_batch.trajectory_timesteps,
+            "trajectory_decoded": output_batch.trajectory_decoded,
+            "video_path": None,  # batched profiling默认不落盘
+            "peak_memory_mb": output_batch.extra.get("peak_memory_mb"),
         }
 
         return result
