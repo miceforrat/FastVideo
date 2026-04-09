@@ -468,7 +468,9 @@ class VideoGenerator:
             "trajectory_decoded": output_batch.trajectory_decoded,
             "video_path": output_path if batch.save_video else None,
             "peak_memory_mb": output_batch.extra.get("peak_memory_mb"),
-            "durations": output_batch.extra.get("durations")
+            "durations": output_batch.extra.get("durations"),
+            "kv_cache_mib": output_batch.extra.get("kv_cache_mib"),
+            "crossattn_mib": output_batch.extra.get("crossattn_mib")
         }
 
         return result

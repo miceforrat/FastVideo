@@ -474,6 +474,7 @@ class CausalWanTransformer3DModel(BaseDiT):
         orig_dtype = hidden_states.dtype
         if not isinstance(encoder_hidden_states, torch.Tensor):
             encoder_hidden_states = encoder_hidden_states[0]
+        encoder_hs_bs = encoder_hidden_states.shape[0]
         if isinstance(encoder_hidden_states_image,
                       list) and len(encoder_hidden_states_image) > 0:
             encoder_hidden_states_image = encoder_hidden_states_image[0]
@@ -513,7 +514,8 @@ class CausalWanTransformer3DModel(BaseDiT):
         grid_sizes = grid_size.unsqueeze(0).repeat(batch_size, 1)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
 
-        encoder_hidden_states = torch.cat([encoder_hidden_states, encoder_hidden_states.new_zeros(1, self.text_len - encoder_hidden_states.size(1), encoder_hidden_states.size(2))], dim=1)
+        encoder_hidden_states = torch.cat([encoder_hidden_states, \
+            encoder_hidden_states.new_zeros(encoder_hs_bs, self.text_len - encoder_hidden_states.size(1), encoder_hidden_states.size(2))], dim=1)
 
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
                         timestep.flatten(), encoder_hidden_states, encoder_hidden_states_image)

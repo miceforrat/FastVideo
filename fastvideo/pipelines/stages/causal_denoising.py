@@ -87,6 +87,17 @@ class CausalDMDDenosingStage(DenoisingStage):
         latents = batch.latents  # [B, C, T, H, W]
         b, c, t, h, w = latents.shape
         prompt_embeds = batch.prompt_embeds
+        
+        if len(prompt_embeds) > 0:
+            assert isinstance(prompt_embeds[0], torch.Tensor)
+            # prompt_bs = prompt_embeds[0].shape[0]
+            if batch.num_videos_per_prompt > 1:
+                # assert batch.num_videos_per_prompt % prompt_bs == 0
+                # extend_times = batch.num_videos_per_prompt // prompt_bs
+
+                # 权且将num videos per prompt的支持放在这里，其实按理来说放到更前面的stage会更好
+                prompt_embeds[0] = prompt_embeds[0].repeat_interleave(batch.num_videos_per_prompt, dim=0)
+            # logger.info(f"prompe embd size: {prompt_embeds[0].shape}")
         assert torch.isnan(prompt_embeds[0]).sum() == 0
 
         # Initialize or reset caches
@@ -341,12 +352,16 @@ class CausalDMDDenosingStage(DenoisingStage):
 
         batch.latents = latents
         if fastvideo_args.log_kv_cache_size:
+            kv_cache_mib = bytes_to_mib(tensor_bytes(kv_cache1))
+            crossattn_mib = bytes_to_mib(tensor_bytes(crossattn_cache))
             logger.info(
                 "[kv-cache][block=%d][after_clean_context] kv_cache_mib=%.2f crossattn_cache_mib=%.2f",
                 start_index // self.num_frames_per_block,
-                bytes_to_mib(tensor_bytes(kv_cache1)),
-                bytes_to_mib(tensor_bytes(crossattn_cache)),
+                kv_cache_mib,
+                crossattn_mib
             )
+            batch.extra["kv_cache_mib"]=kv_cache_mib
+            batch.extra["crossattn_mib"]=crossattn_mib
         return batch
 
     def _initialize_kv_cache(self, batch_size, dtype, device) -> list[dict]:
