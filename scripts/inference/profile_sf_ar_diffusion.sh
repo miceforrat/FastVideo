@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-SCRIPT="examples/inference/basic/basic_self_forcing_causal_profiling.py"
+SCRIPT="examples/inference/profiling/basic_self_forcing_causal_profiling.py"
 
 LOG_DIR=logs
 mkdir -p "$LOG_DIR"

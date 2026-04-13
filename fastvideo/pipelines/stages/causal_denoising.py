@@ -137,6 +137,8 @@ class CausalDMDDenosingStage(DenoisingStage):
         if boundary_timestep is not None:
             block_sizes[0] = 1
 
+        # print("frame_seq_length =", self.frame_seq_length)
+        # print("block_sizes =", block_sizes)
         first_frame_latent = None
         if batch.pil_image is not None:
             # Causal video gen directly replaces the first frame of the latent with
@@ -202,14 +204,30 @@ class CausalDMDDenosingStage(DenoisingStage):
                 # use BTCHW for DMD conversion routines
                 noise_latents_btchw = current_latents.permute(0, 2, 1, 3, 4)
                 video_raw_latent_shape = noise_latents_btchw.shape
-
+                # print(
+                #     f"[chunk] "
+                #     f"start_index={start_index}, "
+                #     f"frames={current_num_frames}, "
+                #     f"seq_len={current_num_frames * self.frame_seq_length}, "
+                #     f"current_start={(pos_start_base + start_index) * self.frame_seq_length},"
+                #     f"timesteps length: {len(timesteps)}"
+                # )
                 for i, t_cur in enumerate(timesteps):
                     if boundary_timestep is not None and t_cur < boundary_timestep:
                         current_model = self.transformer_2
                     else:
                         current_model = self.transformer
-                    # logger.info(f"current model: {current_model}")
                     # Copy for pred conversion
+                    # if i == 0:
+                    #     kv = _get_kv_cache(t_cur)
+                    #     if isinstance(kv, list):
+                    #         kv = kv[0]
+
+                    #     print(
+                    #         f"[kv] global_end={kv['global_end_index'].item()}, "
+                    #         f"local_end={kv['local_end_index'].item()}"
+                    #     )
+                    
                     noise_latents = noise_latents_btchw.clone()
                     latent_model_input = current_latents.to(target_dtype)
 

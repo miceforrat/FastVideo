@@ -10,6 +10,7 @@ from fastvideo.pipelines.composed_pipeline_base import ComposedPipelineBase
 import torch
 import argparse
 import time
+from copy import deepcopy
 
 
 # 下面这段patching大部分没用了，因为我发现他们原生就能观测peak memory （mb）
@@ -37,7 +38,6 @@ def hack_pipeline_forward(
     stages_duration = []
     start_time = time.perf_counter()
     last_time = start_time
-
     logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys(), local_main_process_only=False)
 
     # try:
@@ -48,20 +48,14 @@ def hack_pipeline_forward(
         last_time = end_time
         stages_duration.append(duration)
         batch.extra["durations"] = stages_duration
+    
+    # print(f"fastvideo_args: {fastvideo_args}")
+    
     return batch
 
 ComposedPipelineBase.forward = hack_pipeline_forward
 
-# prompts=[
-#     "A curious raccoon peers through a vibrant field of yellow sunflowers, its eyes "
-#     "wide with interest. The playful yet serene atmosphere is complemented by soft "
-#     "natural light filtering through the petals. Mid-shot, warm and cheerful tones.",
-#     "A majestic lion strides across the golden savanna, its powerful frame "
-#     "glistening under the warm afternoon sun. The tall grass ripples gently in "
-#     "the breeze, enhancing the lion's commanding presence. The tone is vibrant, "
-#     "embodying the raw energy of the wild. Low angle, steady tracking shot, "
-#     "cinematic."
-# ]
+from fastvideo.profiling import warmup_iters
 
 
 OUTPUT_PATH = "video_samples_causal"
@@ -122,7 +116,8 @@ def main():
         dit_layerwise_offload=False,
         dit_cpu_offload=False,
         vae_cpu_offload=True,
-        log_kv_cache_size=True
+        log_kv_cache_size=True,
+        tp_size=2
     )
 
     sampling_param = SamplingParam.from_pretrained(model_name)
@@ -132,12 +127,12 @@ def main():
     "natural light filtering through the petals. Mid-shot, warm and cheerful tones."
     prompts = [fake_prompt] * 2
     bs = args.bs
-    warmup_iters = 3
     for _ in range(warmup_iters):
         results = generator.generate_video(fake_prompt, output_path=OUTPUT_PATH, \
             save_video=False, sampling_param=sampling_param, num_videos_per_prompt=bs)
     
-    run_times = 3
+    
+    run_times = 1
     chunk_size = 2
     # assert run_times % chunk_size == 0
     assert chunk_size % bs == 0
