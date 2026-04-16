@@ -3,11 +3,11 @@ set -e
 
 SCRIPT="examples/inference/profiling/basic_self_forcing_causal_profiling.py"
 
-LOG_DIR=logs
+LOG_DIR=logs/profiling
 mkdir -p "$LOG_DIR"
 
 for bs in 1 2; do
-  for num_gpus in 8 4 2 1; do
+  for num_gpus in 4 2 1; do
 
     if [[ "$num_gpus" -eq 1 ]]; then
       log_file="$LOG_DIR/bs${bs}_gpus${num_gpus}_fsdp0.log"

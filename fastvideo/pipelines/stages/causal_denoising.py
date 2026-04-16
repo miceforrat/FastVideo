@@ -10,6 +10,7 @@ from fastvideo.pipelines.stages.denoising import DenoisingStage
 from fastvideo.pipelines.stages.validators import StageValidators as V
 from fastvideo.pipelines.stages.validators import VerificationResult
 from fastvideo.utils import tensor_bytes, bytes_to_mib
+from fastvideo.distributed.parallel_state import get_sp_world_size
 
 try:
     from fastvideo.attention.backends.video_sparse_attn import (VideoSparseAttentionBackend)
@@ -379,13 +380,44 @@ class CausalDMDDenosingStage(DenoisingStage):
             batch.extra["crossattn_mib"]=crossattn_mib
         return batch
 
+    # def _initialize_kv_cache(self, batch_size, dtype, device) -> list[dict]:
+    #     """
+    #     Initialize a Per-GPU KV cache aligned with the Wan model assumptions.
+    #     """
+    #     kv_cache1 = []
+    #     num_attention_heads = self.transformer.num_attention_heads
+    #     attention_head_dim = self.transformer.attention_head_dim
+    #     if self.local_attn_size != -1:
+    #         kv_cache_size = self.local_attn_size * self.frame_seq_length
+    #     else:
+    #         kv_cache_size = self.frame_seq_length * self.sliding_window_num_frames
+
+    #     for _ in range(self.num_transformer_blocks):
+    #         kv_cache1.append({
+    #             "k":
+    #             torch.zeros([batch_size, kv_cache_size, num_attention_heads, attention_head_dim],
+    #                         dtype=dtype,
+    #                         device=device),
+    #             "v":
+    #             torch.zeros([batch_size, kv_cache_size, num_attention_heads, attention_head_dim],
+    #                         dtype=dtype,
+    #                         device=device),
+    #             "global_end_index":
+    #             torch.tensor([0], dtype=torch.long, device=device),
+    #             "local_end_index":
+    #             torch.tensor([0], dtype=torch.long, device=device),
+    #         })
+
+    #     return kv_cache1
+
     def _initialize_kv_cache(self, batch_size, dtype, device) -> list[dict]:
-        """
-        Initialize a Per-GPU KV cache aligned with the Wan model assumptions.
-        """
         kv_cache1 = []
         num_attention_heads = self.transformer.num_attention_heads
         attention_head_dim = self.transformer.attention_head_dim
+        sp_world_size = get_sp_world_size()
+        assert num_attention_heads % sp_world_size == 0
+        local_num_heads = num_attention_heads // sp_world_size
+
         if self.local_attn_size != -1:
             kv_cache_size = self.local_attn_size * self.frame_seq_length
         else:
@@ -393,18 +425,18 @@ class CausalDMDDenosingStage(DenoisingStage):
 
         for _ in range(self.num_transformer_blocks):
             kv_cache1.append({
-                "k":
-                torch.zeros([batch_size, kv_cache_size, num_attention_heads, attention_head_dim],
-                            dtype=dtype,
-                            device=device),
-                "v":
-                torch.zeros([batch_size, kv_cache_size, num_attention_heads, attention_head_dim],
-                            dtype=dtype,
-                            device=device),
-                "global_end_index":
-                torch.tensor([0], dtype=torch.long, device=device),
-                "local_end_index":
-                torch.tensor([0], dtype=torch.long, device=device),
+                "k": torch.zeros(
+                    [batch_size, kv_cache_size, local_num_heads, attention_head_dim],
+                    dtype=dtype,
+                    device=device,
+                ),
+                "v": torch.zeros(
+                    [batch_size, kv_cache_size, local_num_heads, attention_head_dim],
+                    dtype=dtype,
+                    device=device,
+                ),
+                "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
+                "local_end_index": torch.tensor([0], dtype=torch.long, device=device),
             })
 
         return kv_cache1

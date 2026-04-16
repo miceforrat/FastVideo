@@ -6,6 +6,7 @@ Decoding stage for diffusion pipelines.
 import weakref
 
 import torch
+import torch.distributed as dist
 
 from fastvideo.distributed import get_local_torch_device
 from fastvideo.fastvideo_args import FastVideoArgs
@@ -77,43 +78,109 @@ class DecodingStage(PipelineStage):
 
         return latents
 
+    # @torch.no_grad()
+    # def decode(self, latents: torch.Tensor, fastvideo_args: FastVideoArgs) -> torch.Tensor:
+    #     """
+    #     Decode latent representations into pixel space using VAE.
+        
+    #     Args:
+    #         latents: Input latent tensor with shape (batch, channels, frames, height_latents, width_latents)
+    #         fastvideo_args: Configuration containing:
+    #             - disable_autocast: Whether to disable automatic mixed precision (default: False)
+    #             - pipeline_config.vae_precision: VAE computation precision ("fp32", "fp16", "bf16")
+    #             - pipeline_config.vae_tiling: Whether to enable VAE tiling for memory efficiency
+            
+    #     Returns:
+    #         Decoded video tensor with shape (batch, channels, frames, height, width), 
+    #         normalized to [0, 1] range and moved to CPU as float32
+    #     """
+    #     self.vae = self.vae.to(get_local_torch_device())
+    #     latents = latents.to(get_local_torch_device())
+
+    #     # Setup VAE precision
+    #     vae_dtype = PRECISION_TO_TYPE[fastvideo_args.pipeline_config.vae_precision]
+    #     vae_autocast_enabled = (vae_dtype != torch.float32) and not fastvideo_args.disable_autocast
+
+    #     latents = self._denormalize_latents(latents)
+
+    #     # Decode latents
+    #     with torch.autocast(device_type="cuda", dtype=vae_dtype, enabled=vae_autocast_enabled):
+    #         if fastvideo_args.pipeline_config.vae_tiling:
+    #             self.vae.enable_tiling()
+    #         # if fastvideo_args.vae_sp:
+    #         #     self.vae.enable_parallel()
+    #         if not vae_autocast_enabled:
+    #             latents = latents.to(vae_dtype)
+    #         image = self.vae.decode(latents)
+
+    #     # Normalize image to [0, 1] range
+    #     image = (image / 2 + 0.5).clamp(0, 1)
+    #     return image
+    
     @torch.no_grad()
-    def decode(self, latents: torch.Tensor, fastvideo_args: FastVideoArgs) -> torch.Tensor:
+    def decode(self, latents: torch.Tensor, fastvideo_args: FastVideoArgs) -> torch.Tensor | None:
         """
         Decode latent representations into pixel space using VAE.
-        
-        Args:
-            latents: Input latent tensor with shape (batch, channels, frames, height_latents, width_latents)
-            fastvideo_args: Configuration containing:
-                - disable_autocast: Whether to disable automatic mixed precision (default: False)
-                - pipeline_config.vae_precision: VAE computation precision ("fp32", "fp16", "bf16")
-                - pipeline_config.vae_tiling: Whether to enable VAE tiling for memory efficiency
-            
-        Returns:
-            Decoded video tensor with shape (batch, channels, frames, height, width), 
-            normalized to [0, 1] range and moved to CPU as float32
+
+        Supports optional batch-dimension sharding across DP ranks:
+        - shard on dim 0
+        - local VAE decode
+        - optional all_gather to restore full batch
         """
+        import torch.distributed as dist
+
         self.vae = self.vae.to(get_local_torch_device())
         latents = latents.to(get_local_torch_device())
+
+        # ---- DP batch sharding switches ----
+        vae_dp = fastvideo_args.dp_decoding
+
+        latents_local, num_shards, is_active = self._shard_batch_for_rank(
+            latents,
+            enable=vae_dp
+        )
+
+        # 当前 rank 没分到数据
+        if not is_active:
+            if vae_dp and dist.is_available() and dist.is_initialized():
+                # 仍参与 gather，最后会拿到完整 batch
+                image_local = None
+                image = self._gather_sharded_batch(
+                    image_local,
+                    num_shards=num_shards,
+                    is_active=False,
+                )
+                return None if image is None else (image / 2 + 0.5).clamp(0, 1)
+            return None
 
         # Setup VAE precision
         vae_dtype = PRECISION_TO_TYPE[fastvideo_args.pipeline_config.vae_precision]
         vae_autocast_enabled = (vae_dtype != torch.float32) and not fastvideo_args.disable_autocast
 
-        latents = self._denormalize_latents(latents)
+        latents_local = self._denormalize_latents(latents_local)
 
-        # Decode latents
+        # Decode local shard
         with torch.autocast(device_type="cuda", dtype=vae_dtype, enabled=vae_autocast_enabled):
             if fastvideo_args.pipeline_config.vae_tiling:
                 self.vae.enable_tiling()
             # if fastvideo_args.vae_sp:
             #     self.vae.enable_parallel()
             if not vae_autocast_enabled:
-                latents = latents.to(vae_dtype)
-            image = self.vae.decode(latents)
+                latents_local = latents_local.to(vae_dtype)
+            image_local = self.vae.decode(latents_local)
+
+        # Optional gather back to full batch
+        if vae_dp:
+            image = self._gather_sharded_batch(
+                image_local,
+                num_shards=num_shards,
+                is_active=True,
+            )
+        else:
+            image = image_local
 
         # Normalize image to [0, 1] range
-        image = (image / 2 + 0.5).clamp(0, 1)
+        image = None if image is None else (image / 2 + 0.5).clamp(0, 1)
         return image
 
     @torch.no_grad()
@@ -245,3 +312,107 @@ class DecodingStage(PipelineStage):
             fastvideo_args.model_loaded["vae"] = False
 
         return batch
+
+    def _shard_batch_for_rank(
+        self,
+        x: torch.Tensor,
+        enable: bool,
+    ) -> tuple[torch.Tensor | None, int, bool]:
+        import torch.distributed as dist
+
+        if not enable:
+            return x, 1, True
+
+        if not dist.is_available() or not dist.is_initialized():
+            return x, 1, True
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        batch_size = x.shape[0]
+
+        if batch_size <= 0:
+            return None, 0, False
+
+        # 最多只能切成 batch_size 份非空块
+        num_chunks = min(world_size, batch_size)
+        assert batch_size % num_chunks == 0
+        chunks = torch.tensor_split(x, num_chunks, dim=0)
+
+        if rank >= num_chunks:
+            return None, num_chunks, False
+
+        return chunks[rank].contiguous(), num_chunks, True
+    
+    def _gather_sharded_batch(
+        self,
+        x_local: torch.Tensor | None,
+        num_shards: int,
+        is_active: bool,
+    ) -> torch.Tensor | None:
+        import torch
+        import torch.distributed as dist
+
+        if not dist.is_available() or not dist.is_initialized():
+            return x_local
+
+        world_size = dist.get_world_size()
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+        # 1) 收集每个 rank 的 local batch size
+        local_bs = 0 if (x_local is None or not is_active) else x_local.shape[0]
+        bs_tensor = torch.tensor([local_bs], device=device, dtype=torch.long)
+        bs_list = [torch.zeros_like(bs_tensor) for _ in range(world_size)]
+        dist.all_gather(bs_list, bs_tensor)
+        all_bs = [int(t.item()) for t in bs_list]
+
+        max_bs = max(all_bs)
+        if max_bs == 0:
+            return None
+
+        # 2) 获取 sample shape / dtype
+        if x_local is not None and is_active:
+            tail_shape = list(x_local.shape[1:])
+            dtype = x_local.dtype
+        else:
+            tail_shape = None
+            dtype = None
+
+        obj = [None]
+        rank = dist.get_rank()
+        if tail_shape is not None:
+            obj = [("shape_dtype", tail_shape, str(dtype))]
+
+        # 找一个 active rank 广播 shape/dtype
+        src = next(i for i, b in enumerate(all_bs) if b > 0)
+        dist.broadcast_object_list(obj, src=src)
+
+        _, tail_shape, dtype_str = obj[0]
+        dtype_name = dtype_str.split(".")[-1]
+        dtype = getattr(torch, dtype_name)
+
+        # 3) pad 到统一 batch 大小，便于 all_gather
+        if x_local is None or not is_active:
+            padded = torch.zeros((max_bs, *tail_shape), device=device, dtype=dtype)
+        else:
+            cur_bs = x_local.shape[0]
+            if cur_bs < max_bs:
+                pad = torch.zeros((max_bs - cur_bs, *tail_shape), device=x_local.device, dtype=x_local.dtype)
+                padded = torch.cat([x_local, pad], dim=0)
+            else:
+                padded = x_local
+
+        # 4) all_gather
+        gathered = [torch.empty_like(padded) for _ in range(world_size)]
+        dist.all_gather(gathered, padded)
+
+        # 5) 只取 active shards，并按真实 bs 裁掉 padding
+        outs = []
+        for i in range(num_shards):
+            cur_bs = all_bs[i]
+            if cur_bs > 0:
+                outs.append(gathered[i][:cur_bs])
+
+        if not outs:
+            return None
+
+        return torch.cat(outs, dim=0)

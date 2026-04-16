@@ -153,6 +153,9 @@ class FastVideoArgs:
 
     # Prompt text file for batch processing
     prompt_txt: str | None = None
+    
+    # enabling distributed data parallel decoding
+    dp_decoding: bool = False
 
     # LTX-2 VAE tiling overrides
     ltx2_vae_tiling: bool | None = None

@@ -138,7 +138,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
 # \tadded_kv_proj_dim: {added_kv_proj_dim} \
 # \tsupported_attn_backends: {supported_attention_backends} \
 # \tprefix: {prefix}")
-        if self.layer_idx >30 or self.layer_idx < 1:
+        if self.layer_idx >30 or self.layer_idx < 0:
             self.profile_time=True
             
 
@@ -197,6 +197,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
         temb: torch.Tensor,
         freqs_cis: tuple[torch.Tensor, torch.Tensor],
         block_mask: BlockMask,
+        original_seq_len: int,
         kv_cache: dict | None = None,
         crossattn_cache: dict | None = None,
         current_start: int = 0,
@@ -212,6 +213,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                 temb,
                 freqs_cis,
                 block_mask,
+                original_seq_len,
                 kv_cache,
                 crossattn_cache,
                 current_start,
@@ -281,7 +283,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                 # print(f"k shape before ca: {key.shape}")
                 # print(f"v shape before ca: {value.shape}")
                 # print(f"freqs cis size: {freqs_cis[0].shape}, {freqs_cis[1].shape}")
-                attn_output = self.attn1(query, key, value, freqs_cis, block_mask, kv_cache, current_start, cache_start)
+                attn_output = self.attn1(query, key, value, freqs_cis, block_mask, original_seq_len, kv_cache, current_start, cache_start)
             
             self.record(events["attn_core_end"])
             

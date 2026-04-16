@@ -78,7 +78,7 @@ def main():
     parser.add_argument(
         "--num_gpus",
         type=int,
-        choices=[1, 2, 4, 8],
+        choices=[1, 2, 4],
         default=1,
         help="Number of GPUs to use"
     )
@@ -87,7 +87,7 @@ def main():
     parser.add_argument(
         "--bs",
         type=int,
-        choices=[1, 2],
+        choices=[1, 2, 4],
         default=1,
         help="Batch size"
     )
@@ -116,7 +116,8 @@ def main():
         dit_layerwise_offload=False,
         dit_cpu_offload=False,
         vae_cpu_offload=True,
-        log_kv_cache_size=True
+        log_kv_cache_size=True,
+        dp_decoding=True
     )
 
     sampling_param = SamplingParam.from_pretrained(model_name)
@@ -132,11 +133,11 @@ def main():
     
     
     run_times = 1
-    chunk_size = 2
+    gen_images_cnt = 4
     # assert run_times % chunk_size == 0
-    assert chunk_size % bs == 0
+    assert gen_images_cnt % bs == 0
     
-    video_gen_times = chunk_size // bs
+    video_gen_times = gen_images_cnt // bs
     
     all_stage_durations = []
     full_durations = []
@@ -147,7 +148,7 @@ def main():
     for i in range(run_times):
         start_time = time.time()
         for j in range(video_gen_times):
-            results = generator.generate_video(fake_prompt, output_path=OUTPUT_PATH, save_video=False, \
+            results = generator.generate_video(fake_prompt, output_path=OUTPUT_PATH, save_video=True, \
                 sampling_param=sampling_param, num_videos_per_prompt=bs)
             # print(f"peak_memory_mb: {results["peak_memory_mb"]}; generation_time: {results["generation_time"]}")
             # print(f"durations: {results["durations"]}")
@@ -159,7 +160,7 @@ def main():
         end_time = time.time()
         full_duration = end_time-start_time
         full_durations.append(full_duration)
-        print(f"forward {chunk_size} videos time: {full_duration}")
+        print(f"forward {gen_images_cnt} videos time: {full_duration}")
 
     # start_time = time.time()
     

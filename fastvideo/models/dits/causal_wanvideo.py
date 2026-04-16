@@ -35,6 +35,11 @@ from fastvideo.models.dits.base import BaseDiT
 from fastvideo.models.dits.wanvideo import WanT2VCrossAttention, WanTimeTextImageEmbedding
 from fastvideo.platforms import AttentionBackendEnum, current_platform
 
+from fastvideo.distributed.communication_op import (
+    sequence_model_parallel_all_gather_with_unpad,
+    sequence_model_parallel_shard,
+    sequence_model_parallel_all_to_all_4D)
+
 logger = init_logger(__name__)
 class CausalWanSelfAttention(nn.Module):
 
@@ -74,6 +79,7 @@ class CausalWanSelfAttention(nn.Module):
                 v: torch.Tensor,
                 freqs_cis: tuple[torch.Tensor, torch.Tensor],
                 block_mask: BlockMask,
+                original_seq_len: int = -1, # no use in local attn
                 kv_cache: dict | None = None,
                 current_start: int = 0,
                 cache_start: int | None = None):
@@ -178,6 +184,167 @@ class CausalWanSelfAttention(nn.Module):
 
         return x
 
+class CausalWanDistributedSelfAttention(nn.Module):
+
+    def __init__(self,
+                 dim: int,
+                 num_heads: int,
+                 local_attn_size: int = -1,
+                 sink_size: int = 0,
+                 qk_norm=True,
+                 eps=1e-6,
+                 parallel_attention=False) -> None:
+        assert dim % num_heads == 0
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.local_attn_size = local_attn_size
+        self.sink_size = sink_size
+        self.qk_norm = qk_norm
+        self.eps = eps
+        self.parallel_attention = parallel_attention
+        self.max_attention_size = 32760 if local_attn_size == -1 else local_attn_size * 1560
+
+        # Scaled dot product attention
+        sp_world_size = get_sp_world_size()
+        assert num_heads % sp_world_size == 0
+        self.local_num_heads = num_heads // sp_world_size
+
+        self.attn = LocalAttention(
+            num_heads=self.local_num_heads,
+            head_size=self.head_dim,
+            dropout_rate=0,
+            softmax_scale=None,
+            causal=False,
+            supported_attention_backends=(
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+            ),
+        )
+
+    def forward(self, 
+                q: torch.Tensor,
+                k: torch.Tensor,
+                v: torch.Tensor,
+                freqs_cis: tuple[torch.Tensor, torch.Tensor],
+                block_mask: BlockMask,
+                original_seq_len: int,
+                kv_cache: dict | None = None,
+                current_start: int = 0,
+                cache_start: int | None = None):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L, num_heads, C / num_heads]
+            seq_lens(Tensor): Shape [B]
+            grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
+            freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
+        """
+        if cache_start is None:
+            cache_start = current_start
+
+        # 1) local-seq/full-heads -> full-seq/local-heads
+        qkv = torch.cat([q, k, v], dim=0)
+        qkv = sequence_model_parallel_all_to_all_4D(qkv, scatter_dim=2, gather_dim=1)
+
+        pad_seq_len = qkv.shape[1] - original_seq_len
+        qkv = qkv[:, :original_seq_len, :, :]
+        q, k, v = qkv.chunk(3, dim=0)
+        
+        cos, sin = freqs_cis
+        roped_query = _apply_rotary_emb(q, cos, sin, is_neox_style=False).type_as(v)
+        roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(v)
+
+        if kv_cache is None:
+            # Padding for flex attention
+            padded_length = math.ceil(q.shape[1] / 128) * 128 - q.shape[1]
+            padded_roped_query = torch.cat(
+                [roped_query,
+                    torch.zeros([q.shape[0], padded_length, q.shape[2], q.shape[3]],
+                                device=q.device, dtype=v.dtype)],
+                dim=1
+            )
+
+            padded_roped_key = torch.cat(
+                [roped_key, torch.zeros([k.shape[0], padded_length, k.shape[2], k.shape[3]],
+                                        device=k.device, dtype=v.dtype)],
+                dim=1
+            )
+
+            padded_v = torch.cat(
+                [v, torch.zeros([v.shape[0], padded_length, v.shape[2], v.shape[3]],
+                                device=v.device, dtype=v.dtype)],
+                dim=1
+            )
+
+            x = flex_attention(
+                query=padded_roped_query.transpose(2, 1),
+                key=padded_roped_key.transpose(2, 1),
+                value=padded_v.transpose(2, 1),
+                block_mask=block_mask
+            )[:, :, :-padded_length].transpose(2, 1)
+            
+        else:
+            frame_seqlen = q.shape[1]
+            current_end = current_start + roped_query.shape[1]
+            sink_tokens = self.sink_size * frame_seqlen
+            # If we are using local attention and the current KV cache size is larger than the local attention size, we need to truncate the KV cache
+            kv_cache_size = kv_cache["k"].shape[1]
+            num_new_tokens = roped_query.shape[1]
+            global_end_index = (
+                int(kv_cache["global_end_index"].item())
+                if isinstance(kv_cache["global_end_index"], torch.Tensor)
+                else int(kv_cache["global_end_index"])
+            )
+            local_end_index_prev = (
+                int(kv_cache["local_end_index"].item())
+                if isinstance(kv_cache["local_end_index"], torch.Tensor)
+                else int(kv_cache["local_end_index"])
+            )
+            if self.local_attn_size != -1 and (current_end > global_end_index) and (
+                    num_new_tokens + local_end_index_prev > kv_cache_size):
+                # Calculate the number of new tokens added in this step
+                # Shift existing cache content left to discard oldest tokens
+                # Clone the source slice to avoid overlapping memory error
+                num_evicted_tokens = num_new_tokens + local_end_index_prev - kv_cache_size
+                num_rolled_tokens = local_end_index_prev - num_evicted_tokens - sink_tokens
+                kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                    kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
+                    kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                # Insert the new keys/values at the end
+                local_end_index = local_end_index_prev + current_end - \
+                    global_end_index - num_evicted_tokens
+                local_start_index = local_end_index - num_new_tokens
+                kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+                kv_cache["v"][:, local_start_index:local_end_index] = v
+            else:
+                # Assign new keys/values directly up to current_end
+                local_end_index = local_end_index_prev + current_end - global_end_index
+                local_start_index = local_end_index - num_new_tokens
+                kv_cache["k"] = kv_cache["k"].detach()
+                kv_cache["v"] = kv_cache["v"].detach()
+                # logger.info("kv_cache['k'] is in comp graph: %s", kv_cache["k"].requires_grad or kv_cache["k"].grad_fn is not None)
+                kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+                kv_cache["v"][:, local_start_index:local_end_index] = v
+            x = self.attn(
+                roped_query,
+                kv_cache["k"][:, max(0, local_end_index - self.max_attention_size):local_end_index],
+                kv_cache["v"][:, max(0, local_end_index - self.max_attention_size):local_end_index]
+            )
+            if isinstance(kv_cache["global_end_index"], torch.Tensor):
+                kv_cache["global_end_index"].fill_(current_end)
+            else:
+                kv_cache["global_end_index"] = current_end
+            if isinstance(kv_cache["local_end_index"], torch.Tensor):
+                kv_cache["local_end_index"].fill_(local_end_index)
+            else:
+                kv_cache["local_end_index"] = local_end_index
+        # 4) full-seq/local-heads -> local-seq/full-heads
+        x = torch.nn.functional.pad(x, (0, 0, 0, 0, 0, pad_seq_len))
+        x = sequence_model_parallel_all_to_all_4D(x, scatter_dim=1, gather_dim=2)
+        return x
+
 class CausalWanTransformerBlock(nn.Module):
 
     def __init__(self,
@@ -201,7 +368,7 @@ class CausalWanTransformerBlock(nn.Module):
         self.to_v = ReplicatedLinear(dim, dim, bias=True)
 
         self.to_out = ReplicatedLinear(dim, dim, bias=True)
-        self.attn1 = CausalWanSelfAttention(
+        self.attn1 = CausalWanDistributedSelfAttention(
             dim,
             num_heads,
             local_attn_size=local_attn_size,
@@ -256,6 +423,7 @@ class CausalWanTransformerBlock(nn.Module):
         temb: torch.Tensor,
         freqs_cis: tuple[torch.Tensor, torch.Tensor],
         block_mask: BlockMask,
+        original_seq_len: int,
         kv_cache: dict | None = None,
         crossattn_cache: dict | None = None,
         current_start: int = 0,
@@ -294,7 +462,7 @@ class CausalWanTransformerBlock(nn.Module):
         key = key.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
         value = value.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
 
-        attn_output = self.attn1(query, key, value, freqs_cis, block_mask, kv_cache, current_start, cache_start)
+        attn_output = self.attn1(query, key, value, freqs_cis, block_mask,original_seq_len, kv_cache, current_start, cache_start)
         attn_output = attn_output.flatten(2)
         attn_output, _ = self.to_out(attn_output)
         attn_output = attn_output.squeeze(1)
@@ -491,14 +659,13 @@ class CausalWanTransformer3DModel(BaseDiT):
         d = self.hidden_size // self.num_attention_heads
         rope_dim_list = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
         freqs_cos, freqs_sin = get_rotary_pos_embed(
-            (post_patch_num_frames * get_sp_world_size(), post_patch_height,
+            (post_patch_num_frames, post_patch_height,
              post_patch_width),
             self.hidden_size,
             self.num_attention_heads,
             rope_dim_list,
             dtype=torch.float32 if current_platform.is_mps() else torch.float64,
             rope_theta=10000,
-            do_sp_sharding=True,
             start_frame=start_frame # Assume that start_frame is 0 when kv_cache is None
         )
         freqs_cos = freqs_cos.to(hidden_states.device)
@@ -513,6 +680,9 @@ class CausalWanTransformer3DModel(BaseDiT):
         grid_size = torch.tensor(hidden_states[0].shape[1:], dtype=torch.long, device=hidden_states.device)
         grid_sizes = grid_size.unsqueeze(0).repeat(batch_size, 1)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
+        
+        # try doing sharding
+        hidden_states, original_seq_len = sequence_model_parallel_shard(hidden_states, dim=1)
 
         encoder_hidden_states = torch.cat([encoder_hidden_states, \
             encoder_hidden_states.new_zeros(encoder_hs_bs, self.text_len - encoder_hidden_states.size(1), encoder_hidden_states.size(2))], dim=1)
@@ -538,11 +708,12 @@ class CausalWanTransformer3DModel(BaseDiT):
                     "kv_cache": kv_cache[block_index],
                     "current_start": current_start,
                     "cache_start": cache_start,
-                    "block_mask": self.block_mask
+                    "block_mask": self.block_mask,
+                    "original_seq_len": original_seq_len
                 }
                 hidden_states = self._gradient_checkpointing_func(
                     block, hidden_states, encoder_hidden_states,
-                    timestep_proj, freqs_cis,
+                    timestep_proj, freqs_cis, 
                     **causal_kwargs)
             else:
                 causal_kwargs = {
@@ -550,7 +721,8 @@ class CausalWanTransformer3DModel(BaseDiT):
                     "crossattn_cache": crossattn_cache[block_index],
                     "current_start": current_start,
                     "cache_start": cache_start,
-                    "block_mask": self.block_mask
+                    "block_mask": self.block_mask,
+                    "original_seq_len": original_seq_len
                 }
                 hidden_states = block(hidden_states, encoder_hidden_states,
                                         timestep_proj, freqs_cis,
@@ -561,6 +733,11 @@ class CausalWanTransformer3DModel(BaseDiT):
         shift, scale = (self.scale_shift_table.unsqueeze(1) + temb).chunk(2,
                                                                     dim=2)
         hidden_states = self.norm_out(hidden_states, shift, scale)
+        
+        hidden_states = sequence_model_parallel_all_gather_with_unpad(
+            hidden_states, original_seq_len, dim=1
+        )
+        
         hidden_states = self.proj_out(hidden_states)
 
         output = self.unpatchify(hidden_states, grid_sizes)
