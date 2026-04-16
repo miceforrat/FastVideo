@@ -116,8 +116,7 @@ def main():
         dit_layerwise_offload=False,
         dit_cpu_offload=False,
         vae_cpu_offload=True,
-        log_kv_cache_size=True,
-        tp_size=2
+        log_kv_cache_size=True
     )
 
     sampling_param = SamplingParam.from_pretrained(model_name)

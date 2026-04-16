@@ -36,7 +36,7 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 # AR-like diffusion config
 # =========================
 FRAME_SEQ_LENGTH = 1560
-BLOCK_SIZES = [4, 4, 4, 4, 4, 4, 4]   # total 21 frames
+BLOCK_SIZES = [3, 3, 3, 3, 3, 3, 3]   # total 21 frames
 TOTAL_FRAMES = sum(BLOCK_SIZES)
 MAX_SEQ_LEN = TOTAL_FRAMES * FRAME_SEQ_LENGTH
 

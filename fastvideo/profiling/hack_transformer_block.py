@@ -8,6 +8,7 @@ import torch
 elapsed_times = []
 
 warmup_iters = 3
+profile_times=7
 
 def debug_print_inputs(
     hidden_states,
@@ -137,7 +138,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
 # \tadded_kv_proj_dim: {added_kv_proj_dim} \
 # \tsupported_attn_backends: {supported_attention_backends} \
 # \tprefix: {prefix}")
-        if self.layer_idx >30 or self.layer_idx < 0:
+        if self.layer_idx >30 or self.layer_idx < 1:
             self.profile_time=True
             
 
@@ -201,7 +202,8 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
         current_start: int = 0,
         cache_start: int | None = None,
     ) -> torch.Tensor:
-        do_profile = self.fwd_times >= warmup_iters * self.iter_fwds
+        self.warmup_fwds = warmup_iters * self.iter_fwds
+        do_profile = self.fwd_times >= self.warmup_fwds and self.fwd_times < self.warmup_fwds+profile_times
 
         if not do_profile:
             hidden_states = super().forward(
@@ -275,6 +277,10 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
             self.record(events["qkv_end"])
             
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_attn_core"):
+                # print(f"q shape before ca: {query.shape}")
+                # print(f"k shape before ca: {key.shape}")
+                # print(f"v shape before ca: {value.shape}")
+                # print(f"freqs cis size: {freqs_cis[0].shape}, {freqs_cis[1].shape}")
                 attn_output = self.attn1(query, key, value, freqs_cis, block_mask, kv_cache, current_start, cache_start)
             
             self.record(events["attn_core_end"])

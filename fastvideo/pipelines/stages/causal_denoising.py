@@ -286,9 +286,6 @@ class CausalDMDDenosingStage(DenoisingStage):
                             boundary_timestep=torch.ones_like(t_expand) * boundary_timestep,
                             scheduler=self.scheduler).unflatten(0, pred_noise_btchw.shape[:2])
                     else:
-                        # logger.info(f"t_expand shape: {t_expand.shape}")
-                        # logger.info(f"noise_latents shape: {noise_latents.shape}")
-                        # logger.info(f"pred noise shape: {pred_noise_btchw.shape}")
                         pred_video_btchw = pred_noise_to_pred_video(pred_noise=pred_noise_btchw.flatten(0, 1),
                                                                     noise_input_latent=noise_latents.flatten(0, 1),
                                                                     timestep=t_expand,
