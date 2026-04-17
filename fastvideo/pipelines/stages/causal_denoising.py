@@ -11,6 +11,7 @@ from fastvideo.pipelines.stages.validators import StageValidators as V
 from fastvideo.pipelines.stages.validators import VerificationResult
 from fastvideo.utils import tensor_bytes, bytes_to_mib
 from fastvideo.distributed.parallel_state import get_sp_world_size
+from fastvideo.profiling.time_profiler import get_global_time_profiler
 
 try:
     from fastvideo.attention.backends.video_sparse_attn import (VideoSparseAttentionBackend)
@@ -197,10 +198,13 @@ class CausalDMDDenosingStage(DenoisingStage):
             start_index += 1
             block_sizes.pop(0)
             latents[:, :, :1, :, :] = first_frame_latent
-
+        chunk_idx = 0
         # DMD loop in causal blocks
         with self.progress_bar(total=len(block_sizes) * len(timesteps)) as progress_bar:
             for current_num_frames in block_sizes:
+                get_global_time_profiler().set_chunk(chunk_idx)
+                import time
+                chunk_denoising_start = time.perf_counter()
                 current_latents = latents[:, :, start_index:start_index + current_num_frames, :, :]
                 # use BTCHW for DMD conversion routines
                 noise_latents_btchw = current_latents.permute(0, 2, 1, 3, 4)
@@ -361,6 +365,10 @@ class CausalDMDDenosingStage(DenoisingStage):
                     )
 
                 start_index += current_num_frames
+                chunk_end_time = time.perf_counter()
+                if get_global_time_profiler().time_profile:
+                    get_global_time_profiler().submit_by_chunk({"chunk_denoising_time": chunk_end_time - chunk_denoising_start})
+                chunk_idx += 1
 
         if boundary_timestep is not None:
             num_frames_to_remove = self.num_frames_per_block - 1

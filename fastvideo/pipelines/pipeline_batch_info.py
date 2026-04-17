@@ -220,6 +220,8 @@ class ForwardBatch:
 
     # Logging info
     logging_info: PipelineLoggingInfo = field(default_factory=PipelineLoggingInfo)
+    
+    do_profiling: bool = False
 
     def __post_init__(self):
         """Initialize dependent fields after dataclass initialization."""

@@ -23,6 +23,8 @@ from fastvideo.pipelines.pipeline_batch_info import ForwardBatch
 from fastvideo.pipelines.stages import PipelineStage
 import fastvideo.envs as envs
 from fastvideo.utils import (maybe_download_model, verify_model_config_and_directory)
+from fastvideo.profiling.time_profiler import get_global_time_profiler
+import time
 
 logger = init_logger(__name__)
 
@@ -434,23 +436,39 @@ class ComposedPipelineBase(ABC):
     ) -> ForwardBatch:
         """
         Generate a video or image using the pipeline.
-        
+
         Args:
             batch: The batch to generate from.
             fastvideo_args: The inference arguments.
         Returns:
             ForwardBatch: The batch with the generated video or image.
         """
+
+        get_global_time_profiler().set_time_profile(batch.do_profiling)
         if not self.post_init_called:
             self.post_init()
-
-        # Execute each stage
-        logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys())
-        # logger.info("Batch: %s", batch)
+            
+        logger.info("Running pipeline stages: %s", self._stage_name_mapping.keys(), local_main_process_only=False)
+        # stages_duration = []
+        stages_duration_dict = {}
+        start_time = time.perf_counter()
+        last_time = start_time
+        # try:
         for stage in self.stages:
             batch = stage(batch, fastvideo_args)
-
-        # Return the output
+            end_time = time.perf_counter()
+            duration = end_time-last_time
+            last_time = end_time
+            # stages_duration.append(duration)
+            stages_duration_dict[type(stage).__name__] = duration
+        # batch.extra["durations"] = stages_duration
+        if get_global_time_profiler().time_profile:
+            get_global_time_profiler().submit_outer(stages_duration_dict)
+        
+        # print(f"fastvideo_args: {fastvideo_args}")
+        batch.extra["outer"] = get_global_time_profiler().outer_results
+        print(batch.extra["outer"])
+        batch.extra["chunkwise"] = get_global_time_profiler().chunk_results
         return batch
 
     def train(self) -> None:

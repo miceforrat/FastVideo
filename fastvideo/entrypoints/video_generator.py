@@ -383,7 +383,9 @@ class VideoGenerator:
             n_tokens=n_tokens,
             VSA_sparsity=fastvideo_args.VSA_sparsity,
         )
-
+        
+        do_profiling = kwargs.get("do_profiling", False)
+        batch.do_profiling = do_profiling
         # Run inference
         start_time = time.perf_counter()
 
@@ -468,9 +470,10 @@ class VideoGenerator:
             "trajectory_decoded": output_batch.trajectory_decoded,
             "video_path": output_path if batch.save_video else None,
             "peak_memory_mb": output_batch.extra.get("peak_memory_mb"),
-            "durations": output_batch.extra.get("durations"),
             "kv_cache_mib": output_batch.extra.get("kv_cache_mib"),
-            "crossattn_mib": output_batch.extra.get("crossattn_mib")
+            "crossattn_mib": output_batch.extra.get("crossattn_mib"),
+            "outer": output_batch.extra.get("outer", []),
+            "chunkwise": output_batch.extra.get("chunkwise", [])
         }
 
         return result

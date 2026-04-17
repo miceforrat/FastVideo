@@ -3,7 +3,7 @@ import fastvideo.models.dits.causal_wanvideo
 from torch.nn.attention.flex_attention import BlockMask
 from fastvideo.platforms import AttentionBackendEnum, current_platform
 import torch
-
+from fastvideo.profiling.time_profiler import TimeProfilingEvent, get_global_time_profiler
 
 elapsed_times = []
 
@@ -138,24 +138,37 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
 # \tadded_kv_proj_dim: {added_kv_proj_dim} \
 # \tsupported_attn_backends: {supported_attention_backends} \
 # \tprefix: {prefix}")
-        if self.layer_idx >30 or self.layer_idx < 0:
+        if self.layer_idx > 30 or self.layer_idx < 1:
             self.profile_time=True
             
 
-    def _new_timer_events(self):
+    def _new_timer_events(self) -> dict[str, TimeProfilingEvent]:
         return {
-            "start": torch.cuda.Event(enable_timing=True),
-            "prepare_end": torch.cuda.Event(enable_timing=True),
+            "start": TimeProfilingEvent(self.profile_time),
+            "prepare_end": TimeProfilingEvent(self.profile_time),
 
             # self-attn 细分
-            "qkv_end": torch.cuda.Event(enable_timing=True),
-            "attn_core_end": torch.cuda.Event(enable_timing=True),
-            "self_attn_end": torch.cuda.Event(enable_timing=True),
+            "qkv_end": TimeProfilingEvent(self.profile_time),
+            "attn_core_end": TimeProfilingEvent(self.profile_time),
+            "self_attn_end": TimeProfilingEvent(self.profile_time),
 
             # 后面
-            "cross_attn_end": torch.cuda.Event(enable_timing=True),
-            "ffn_end": torch.cuda.Event(enable_timing=True),
+            "cross_attn_end": TimeProfilingEvent(self.profile_time),
+            "ffn_end": TimeProfilingEvent(self.profile_time)
         }
+        # return {
+        #     "start": torch.cuda.Event(enable_timing=True),
+        #     "prepare_end": torch.cuda.Event(enable_timing=True),
+
+        #     # self-attn 细分
+        #     "qkv_end": torch.cuda.Event(enable_timing=True),
+        #     "attn_core_end": torch.cuda.Event(enable_timing=True),
+        #     "self_attn_end": torch.cuda.Event(enable_timing=True),
+
+        #     # 后面
+        #     "cross_attn_end": torch.cuda.Event(enable_timing=True),
+        #     "ffn_end": torch.cuda.Event(enable_timing=True),
+        # }
 
     def _print_profile(self, events):
         if self.profile_time:
@@ -184,11 +197,33 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
             print(f"\tcross_attn:     {cross_attn_ms:.6f}")
             print(f"\tffn:            {ffn_ms:.6f}")
             print(f"\ttotal:          {total_ms:.6f}")
-        
-    def record(self, event):
+    
+    def _submit_profile(self, events:dict[str, TimeProfilingEvent]) -> dict[str, int]:
         if self.profile_time:
-            event.record()
-        
+            torch.cuda.synchronize()
+
+            prepare_ms = events["start"].elapsed_time(events["prepare_end"])
+
+            qkv_ms = events["prepare_end"].elapsed_time(events["qkv_end"])
+            attn_core_ms = events["qkv_end"].elapsed_time(events["attn_core_end"])
+            out_proj_ms = events["attn_core_end"].elapsed_time(events["self_attn_end"])
+
+            self_attn_total = events["prepare_end"].elapsed_time(events["self_attn_end"])
+
+            cross_attn_ms = events["self_attn_end"].elapsed_time(events["cross_attn_end"])
+            ffn_ms = events["cross_attn_end"].elapsed_time(events["ffn_end"])
+            total_ms = events["start"].elapsed_time(events["ffn_end"])
+            time_intervals = {}
+            time_intervals["ts_block_total"] = total_ms
+            time_intervals["ts_block_prepare"] = prepare_ms
+            time_intervals["ts_block_self_attn"] = self_attn_total
+            time_intervals["ts_block_qkv_proj"] = qkv_ms
+            time_intervals["ts_block_core_attn"] = attn_core_ms
+            time_intervals["ts_block_out_proj"] = out_proj_ms
+            time_intervals["ts_block_cross_attn"] = cross_attn_ms
+            time_intervals["ts_block_ffn"] = ffn_ms
+            get_global_time_profiler().submit_by_chunk(time_intervals)
+            
     
     def forward(
         self,
@@ -203,9 +238,13 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
         current_start: int = 0,
         cache_start: int | None = None,
     ) -> torch.Tensor:
-        self.warmup_fwds = warmup_iters * self.iter_fwds
-        do_profile = self.fwd_times >= self.warmup_fwds and self.fwd_times < self.warmup_fwds+profile_times
+        # self.warmup_fwds = warmup_iters * self.iter_fwds
+        # do_profile = self.fwd_times >= self.warmup_fwds and self.fwd_times < self.warmup_fwds+profile_times
 
+        do_profile = get_global_time_profiler().time_profile
+        # 只有这个块及其内部的算子开启profile
+        get_global_time_profiler().set_rank_profiling(self.profile_time)
+        
         if not do_profile:
             hidden_states = super().forward(
                 hidden_states,
@@ -222,23 +261,9 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
             self.fwd_times += 1
             return hidden_states
 
-        # if do_profile and self.profile_time:
-        #     debug_print_inputs(
-        #         hidden_states,
-        #         encoder_hidden_states,
-        #         temb,
-        #         freqs_cis,
-        #         block_mask,
-        #         kv_cache,
-        #         crossattn_cache,
-        #         current_start,
-        #         cache_start,
-        #     )
-        
-        # print("outof warmup brs!!!!!!!!!!!!!!!!!!!!!")
         with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_full"):
-            events = self._new_timer_events()
-            self.record(events["start"])
+            events:dict[str, TimeProfilingEvent] = self._new_timer_events()
+            events["start"].record()
 
             # hidden_states.shape: [batch_size, seq_length, inner_dim]
             # temb.shape: [batch_size, num_frames, 6, inner_dim]
@@ -257,7 +282,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                     6, dim=2)
             # *_msa.shape: [batch_size, num_frames, 1, inner_dim]
             # assert shift_msa.dtype == torch.float32
-            self.record(events["prepare_end"])
+            events["prepare_end"].record()
             
             # 1. Self-attention
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_qkv_proj"):
@@ -276,16 +301,17 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                 key = key.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
                 value = value.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
 
-            self.record(events["qkv_end"])
+            events["qkv_end"].record()
             
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_attn_core"):
                 # print(f"q shape before ca: {query.shape}")
                 # print(f"k shape before ca: {key.shape}")
                 # print(f"v shape before ca: {value.shape}")
                 # print(f"freqs cis size: {freqs_cis[0].shape}, {freqs_cis[1].shape}")
-                attn_output = self.attn1(query, key, value, freqs_cis, block_mask, original_seq_len, kv_cache, current_start, cache_start)
+                attn_output = self.attn1(query, key, value, freqs_cis, block_mask, \
+                    original_seq_len, kv_cache, current_start, cache_start, profiling=self.profile_time)
             
-            self.record(events["attn_core_end"])
+            events["attn_core_end"].record()
             
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_out_proj"):
                 attn_output = attn_output.flatten(2)
@@ -298,7 +324,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                 norm_hidden_states, hidden_states = norm_hidden_states.to(
                     orig_dtype), hidden_states.to(orig_dtype)
 
-            self.record(events["self_attn_end"])
+            events["self_attn_end"].record()
             # 2. Cross-attention
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_cross_attn"):
                 attn_output = self.attn2(norm_hidden_states,
@@ -308,15 +334,15 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                 norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
                     hidden_states, attn_output, 1, c_shift_msa, c_scale_msa)
 
-            self.record(events["cross_attn_end"])
+            events["cross_attn_end"].record()
             # 3. Feed-forward
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_ffn"):
                 ff_output = self.ffn(norm_hidden_states)
                 hidden_states = self.mlp_residual(hidden_states, ff_output, c_gate_msa)
             
-            self.record(events["ffn_end"])
+            events["ffn_end"].record()
 
-        self._print_profile(events)
+        # self._print_profile(events)
 
         self.fwd_times += 1
         return hidden_states
