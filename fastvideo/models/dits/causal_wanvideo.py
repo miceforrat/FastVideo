@@ -302,7 +302,7 @@ class CausalWanDistributedSelfAttention(nn.Module):
         k = sequence_model_parallel_all_to_all_4D(k, scatter_dim=2, gather_dim=1)
         
         v = sequence_model_parallel_all_to_all_4D(v, scatter_dim=2, gather_dim=1)
-        events["ca_sp2head_end"]
+        events["ca_sp2head_end"].record()
         
         pad_seq_len = q.shape[1] - original_seq_len
 
@@ -405,7 +405,7 @@ class CausalWanDistributedSelfAttention(nn.Module):
         x = torch.nn.functional.pad(x, (0, 0, 0, 0, 0, pad_seq_len))
         events["ca_head2sp_start"].record()
         x = sequence_model_parallel_all_to_all_4D(x, scatter_dim=1, gather_dim=2)
-        events["ca_sp2head_end"].record() 
+        events["ca_head2sp_end"].record() 
         self._submit_profiling_results(events)
         return x
 

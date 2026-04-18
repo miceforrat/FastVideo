@@ -212,6 +212,19 @@ def pred_noise_to_x_bound(pred_noise: torch.Tensor,
             assert timestep.numel() == noise_input_latent.shape[0]
     else:
         raise ValueError(f"[pred_noise_to_pred_video] Invalid timestep shape: {timestep.shape}")
+
+    if boundary_timestep.ndim == 2:
+        boundary_timestep = boundary_timestep.flatten(0, 1)
+        assert boundary_timestep.numel() == noise_input_latent.shape[0]
+    elif boundary_timestep.ndim == 1:
+        if boundary_timestep.shape[0] == 1:
+            boundary_timestep = boundary_timestep.expand(noise_input_latent.shape[0])
+        else:
+            assert boundary_timestep.numel() == noise_input_latent.shape[0]
+    else:
+        raise ValueError(f"Invalid boundary_timestep shape: {boundary_timestep.shape}")
+    # print("boundary_timestep shape:", boundary_timestep.shape)
+    
     # timestep shape should be [B]
     dtype = pred_noise.dtype
     device = pred_noise.device

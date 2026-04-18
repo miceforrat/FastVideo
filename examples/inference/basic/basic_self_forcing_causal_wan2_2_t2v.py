@@ -13,10 +13,10 @@ def main():
     generator = VideoGenerator.from_pretrained(
         "rand0nmr/SFWan2.2-T2V-A14B-Diffusers",
         # FastVideo will automatically handle distributed setup
-        num_gpus=1,
-        use_fsdp_inference=False, # set to True if GPU is out of memory
+        num_gpus=4,
+        use_fsdp_inference=True, # set to True if GPU is out of memory
         dit_cpu_offload=True, # DiT need to be offloaded for MoE
-        vae_cpu_offload=False,
+        vae_cpu_offload=True,
         text_encoder_cpu_offload=True,
         dmd_denoising_steps=[1000, 850, 700, 550, 350, 275, 200, 125],
         # Set pin_cpu_memory to false if CPU RAM is limited and there're no frequent CPU-GPU transfer
@@ -24,6 +24,7 @@ def main():
         init_weights_from_safetensors="/mnt/sharefs/users/hao.zhang/wei/SFwan2.2_distill_self_forcing_release_cfg2/checkpoint-246_weight_only/generator_inference_transformer/",
         init_weights_from_safetensors_2="/mnt/sharefs/users/hao.zhang/wei/SFwan2.2_distill_self_forcing_release_cfg2/checkpoint-246_weight_only/generator_2_inference_transformer/",
         num_frame_per_block=7,
+        dit_layerwise_offload=False
         # image_encoder_cpu_offload=False,
     )
 

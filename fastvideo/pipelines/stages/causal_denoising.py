@@ -284,12 +284,23 @@ class CausalDMDDenosingStage(DenoisingStage):
 
                     # Convert pred noise to pred video with FM Euler scheduler utilities
                     if boundary_timestep is not None and t_cur >= boundary_timestep:
-                        pred_video_btchw = pred_noise_to_x_bound(
+                        # print(f"pred_noise_btchw shape: {pred_noise_btchw.shape}")
+                        # print(f"t_expend shape: {t_expand.shape}")
+                        # print(f"boundary timestep: {boundary_timestep}")
+                        x_bound = pred_noise_to_x_bound(
                             pred_noise=pred_noise_btchw.flatten(0, 1),
                             noise_input_latent=noise_latents.flatten(0, 1),
                             timestep=t_expand,
                             boundary_timestep=torch.ones_like(t_expand) * boundary_timestep,
-                            scheduler=self.scheduler).unflatten(0, pred_noise_btchw.shape[:2])
+                            scheduler=self.scheduler)
+                        print(f"x_bound_shape: {x_bound.shape}")
+                        pred_video_btchw = x_bound.unflatten(0, pred_noise_btchw.shape[:2])
+                        # pred_video_btchw = pred_noise_to_x_bound(
+                        #     pred_noise=pred_noise_btchw.flatten(0, 1),
+                        #     noise_input_latent=noise_latents.flatten(0, 1),
+                        #     timestep=t_expand,
+                        #     boundary_timestep=torch.ones_like(t_expand) * boundary_timestep,
+                        #     scheduler=self.scheduler).unflatten(0, pred_noise_btchw.shape[:2])
                     else:
                         pred_video_btchw = pred_noise_to_pred_video(pred_noise=pred_noise_btchw.flatten(0, 1),
                                                                     noise_input_latent=noise_latents.flatten(0, 1),

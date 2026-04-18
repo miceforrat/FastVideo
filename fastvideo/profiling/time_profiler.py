@@ -73,21 +73,28 @@ class TimeProfiler():
         
         res_names = ["chunk_idx"]
         res_vals = []
+        num_added = False
         for idx in self.chunk_results.keys():
-            res_vals.append(idx)
+            cur_chunk_res = [idx]
             for key in self.chunk_results[idx].keys():
-                res_names.append(key)
+                if not num_added:
+                    res_names.append(key)
                 data_list = self.chunk_results[idx][key]
-                res_vals.append(np.mean(data_list))
+                cur_chunk_res.append(np.mean(data_list))
                 if key in calc_variance_set:
-                    res_names.append(f"{key}_variance")
-                    res_vals.append(np.var(data_list))
+                    if not num_added:
+                        res_names.append(f"{key}_variance")
+                    cur_chunk_res.append(np.var(data_list))
                 if key in calc_p_dict:
                     threshold = calc_p_dict[key]
-                    res_names.append(f"{key}_p{threshold}")
-                    res_vals.append(np.percentile(data_list, threshold))
+                    if not num_added:
+                        res_names.append(f"{key}_p{threshold}")
+                    cur_chunk_res.append(np.percentile(data_list, threshold))
+            res_vals.append(cur_chunk_res)
+            num_added = True
         print("\t".join(res_names))
-        print("\t".join(str(x) for x in res_vals))
+        for chunk_res in res_vals:
+            print("\t".join(str(x) for x in chunk_res))
     
     def print_outer_results(self):
         res_names = []
