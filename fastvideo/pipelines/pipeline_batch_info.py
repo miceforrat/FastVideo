@@ -223,6 +223,9 @@ class ForwardBatch:
     
     do_profiling: bool = False
 
+    memory_snapshot: bool = False
+    nvtx_profiling: bool = False
+
     def __post_init__(self):
         """Initialize dependent fields after dataclass initialization."""
 

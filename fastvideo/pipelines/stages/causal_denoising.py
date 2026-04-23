@@ -49,6 +49,21 @@ class CausalDMDDenosingStage(DenoisingStage):
         batch: ForwardBatch,
         fastvideo_args: FastVideoArgs,
     ) -> ForwardBatch:
+        if get_global_time_profiler().nvtx_sys_profiling:
+            import torch.cuda.nvtx as nvtx
+            get_global_time_profiler().set_time_profile(False)
+            with nvtx.range("denoising_stage"):
+                res = self._forward(batch, fastvideo_args)
+            get_global_time_profiler().set_time_profile(True)
+        else:
+            res = self._forward(batch, fastvideo_args)
+        return res
+        
+    def _forward(
+        self,
+        batch: ForwardBatch,
+        fastvideo_args: FastVideoArgs,
+    ) -> ForwardBatch:
         target_dtype = torch.bfloat16
         autocast_enabled = (target_dtype != torch.float32) and not fastvideo_args.disable_autocast
 

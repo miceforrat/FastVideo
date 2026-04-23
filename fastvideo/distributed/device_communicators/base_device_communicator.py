@@ -7,7 +7,34 @@ import torch
 import torch.distributed as dist
 from torch import Tensor
 from torch.distributed import ProcessGroup, ReduceOp
+from fastvideo.profiling.time_profiler import TimeProfilingEvent, get_global_time_profiler
 
+def _get_redistributing_attn_heads_events():
+    should_profile = get_global_time_profiler().get_block_profiling() and get_global_time_profiler().get_ca_all2all_profiling()
+    return {
+        "contiguous_start": TimeProfilingEvent(should_profile),
+        "contiguous_end": TimeProfilingEvent(should_profile),
+        "empty_end": TimeProfilingEvent(should_profile),
+        "real_all2all_end": TimeProfilingEvent(should_profile),
+        "cat_output_end": TimeProfilingEvent(should_profile),
+        "transpose_end": TimeProfilingEvent(should_profile)
+    }
+
+def _submit_profiling_redistributing_results(events: dict[str, TimeProfilingEvent]):
+    if get_global_time_profiler().get_block_profiling() and get_global_time_profiler().get_ca_all2all_profiling():
+        torch.cuda.synchronize()
+        results = {}
+        def set_res(sub_name, val):
+            results[f"ca_sp2headall2all_{sub_name}"]=val
+        
+        set_res("contiguous", events["contiguous_start"].elapsed_time(events["contiguous_end"]))
+        set_res("empty", events["contiguous_end"].elapsed_time(events["empty_end"]))    
+        set_res("real", events["empty_end"].elapsed_time(events["real_all2all_end"]))     
+        set_res("cat", events["real_all2all_end"].elapsed_time(events["cat_output_end"])) 
+        set_res("transpose", events["cat_output_end"].elapsed_time(events["transpose_end"]))
+        
+        get_global_time_profiler().submit_by_chunk(results) 
+       
 
 class DistributedAutograd:
     """Collection of autograd functions for distributed operations.

@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any, cast
 
 import torch
+import torch.distributed as dist
 
 from fastvideo.configs.pipelines import PipelineConfig
 from fastvideo.distributed import (maybe_init_distributed_environment_and_model_parallel, get_world_group)
@@ -445,6 +446,11 @@ class ComposedPipelineBase(ABC):
         """
 
         get_global_time_profiler().set_time_profile(batch.do_profiling)
+        get_global_time_profiler().set_nvtx_sys_profiling(batch.nvtx_profiling)
+        get_global_time_profiler().clear()
+        if batch.memory_snapshot:
+            torch.cuda.memory._record_memory_history(enabled=True, trace_alloc_max_entries=200000)
+        
         if not self.post_init_called:
             self.post_init()
             
@@ -462,12 +468,14 @@ class ComposedPipelineBase(ABC):
             # stages_duration.append(duration)
             stages_duration_dict[type(stage).__name__] = duration
         # batch.extra["durations"] = stages_duration
+        if batch.memory_snapshot:
+            torch.cuda.memory._dump_snapshot(f"logs/snapshots/snapshot_rank_{dist.get_rank()}.pickle")
+        
         if get_global_time_profiler().time_profile:
             get_global_time_profiler().submit_outer(stages_duration_dict)
         
         # print(f"fastvideo_args: {fastvideo_args}")
         batch.extra["outer"] = get_global_time_profiler().outer_results
-        print(batch.extra["outer"])
         batch.extra["chunkwise"] = get_global_time_profiler().chunk_results
         return batch
 

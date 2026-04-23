@@ -12,8 +12,8 @@ def main():
     generator = VideoGenerator.from_pretrained(
         model_name,
         # FastVideo will automatically handle distributed setup
-        num_gpus=8,
-        use_fsdp_inference=True, # set to True if GPU is out of memory
+        num_gpus=4,
+        use_fsdp_inference=False, # set to True if GPU is out of memory
         text_encoder_cpu_offload=True,
         dit_layerwise_offload=False,
         dit_cpu_offload=False,

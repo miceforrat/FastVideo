@@ -7,9 +7,6 @@ from fastvideo.profiling.time_profiler import TimeProfilingEvent, get_global_tim
 
 elapsed_times = []
 
-warmup_iters = 3
-profile_times=7
-
 def debug_print_inputs(
     hidden_states,
     encoder_hidden_states,
@@ -126,23 +123,12 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
         self.layer_idx = int(prefix.split(".")[-1])
         self.fwd_times=0
         self.iter_fwds=7 * 4 # chunk nums * timesteps
-#         print(f"input_args: \
-# \tdim: {dim} \
-# \tffn_dim: {ffn_dim} \
-# \tnum_heads: {num_heads} \
-# \tlocal_attn_size: {local_attn_size} \
-# \tsink_size: {sink_size} \
-# \tqk_norm: {qk_norm} \
-# \tcross_attn_norm: {cross_attn_norm} \
-# \teps: {eps} \
-# \tadded_kv_proj_dim: {added_kv_proj_dim} \
-# \tsupported_attn_backends: {supported_attention_backends} \
-# \tprefix: {prefix}")
         if self.layer_idx > 30 or self.layer_idx < 1:
             self.profile_time=True
             
 
     def _new_timer_events(self) -> dict[str, TimeProfilingEvent]:
+        real_profile = get_global_time_profiler().time_profile and self.profile_time
         return {
             "start": TimeProfilingEvent(self.profile_time),
             "prepare_end": TimeProfilingEvent(self.profile_time),
@@ -155,20 +141,9 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
             # 后面
             "cross_attn_end": TimeProfilingEvent(self.profile_time),
             "ffn_end": TimeProfilingEvent(self.profile_time)
+            # "cross_core_attn_end": TimeProfilingEvent(self.profile_time),
+            # "ffn_real_end": TimeProfilingEvent(self.profile_time)
         }
-        # return {
-        #     "start": torch.cuda.Event(enable_timing=True),
-        #     "prepare_end": torch.cuda.Event(enable_timing=True),
-
-        #     # self-attn 细分
-        #     "qkv_end": torch.cuda.Event(enable_timing=True),
-        #     "attn_core_end": torch.cuda.Event(enable_timing=True),
-        #     "self_attn_end": torch.cuda.Event(enable_timing=True),
-
-        #     # 后面
-        #     "cross_attn_end": torch.cuda.Event(enable_timing=True),
-        #     "ffn_end": torch.cuda.Event(enable_timing=True),
-        # }
 
     def _print_profile(self, events):
         if self.profile_time:
@@ -243,9 +218,9 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
 
         do_profile = get_global_time_profiler().time_profile
         # 只有这个块及其内部的算子开启profile
-        get_global_time_profiler().set_rank_profiling(self.profile_time)
+        get_global_time_profiler().set_block_profiling(do_profile and self.profile_time)
         
-        if not do_profile:
+        if not get_global_time_profiler().nvtx_sys_profiling:
             hidden_states = super().forward(
                 hidden_states,
                 encoder_hidden_states,
@@ -284,10 +259,14 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
             # assert shift_msa.dtype == torch.float32
             events["prepare_end"].record()
             
+            # print(f"[L{self.layer_idx}] hidden_states in: {hidden_states.shape}")
+            # print(f"[L{self.layer_idx}] encoder_hidden_states in: {encoder_hidden_states.shape}")
             # 1. Self-attention
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_qkv_proj"):
                 norm_hidden_states = (self.norm1(hidden_states).unflatten(dim=1, sizes=(num_frames, frame_seqlen)) *
                                 (1 + scale_msa) + shift_msa).flatten(1, 2)
+                
+                # print(f"[L{self.layer_idx}] norm_hidden_states before qkv: {norm_hidden_states.shape}")
                 query, _ = self.to_q(norm_hidden_states)
                 key, _ = self.to_k(norm_hidden_states)
                 value, _ = self.to_v(norm_hidden_states)
@@ -302,7 +281,10 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                 value = value.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
 
             events["qkv_end"].record()
-            
+
+            # print(f"[L{self.layer_idx}] q after proj/unflatten: {query.shape}")
+            # print(f"[L{self.layer_idx}] k after proj/unflatten: {key.shape}")
+            # print(f"[L{self.layer_idx}] v after proj/unflatten: {value.shape}")
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_attn_core"):
                 # print(f"q shape before ca: {query.shape}")
                 # print(f"k shape before ca: {key.shape}")
@@ -317,6 +299,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                 attn_output = attn_output.flatten(2)
                 attn_output, _ = self.to_out(attn_output)
                 attn_output = attn_output.squeeze(1)
+                # print(f"[L{self.layer_idx}] attn_output before out_proj: {attn_output.flatten(2).shape}")
 
                 null_shift = null_scale = torch.tensor([0], device=hidden_states.device)
                 norm_hidden_states, hidden_states = self.self_attn_residual_norm(
@@ -325,6 +308,8 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
                     orig_dtype), hidden_states.to(orig_dtype)
 
             events["self_attn_end"].record()
+            # print(f"[L{self.layer_idx}] cross-attn query input: {norm_hidden_states.shape}")
+            # print(f"[L{self.layer_idx}] cross-attn context input: {encoder_hidden_states.shape}")
             # 2. Cross-attention
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_cross_attn"):
                 attn_output = self.attn2(norm_hidden_states,
@@ -336,14 +321,16 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
 
             events["cross_attn_end"].record()
             # 3. Feed-forward
+            # print(f"[L{self.layer_idx}] ffn input: {norm_hidden_states.shape}")
             with torch.cuda.nvtx.range(f"ts_block_{self.layer_idx}_ffn"):
                 ff_output = self.ffn(norm_hidden_states)
+                # print(f"[L{self.layer_idx}] ffn output: {ff_output.shape}")
                 hidden_states = self.mlp_residual(hidden_states, ff_output, c_gate_msa)
+                # print(f"[L{self.layer_idx}] hs after mlp residual: {hidden_states.shape}")
             
             events["ffn_end"].record()
 
-        # self._print_profile(events)
-
+        self._submit_profile(events)
         self.fwd_times += 1
         return hidden_states
         

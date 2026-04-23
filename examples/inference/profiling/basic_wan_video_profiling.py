@@ -1,4 +1,5 @@
 from fastvideo import VideoGenerator
+from fastvideo.profiling.time_profiler import get_global_time_profiler
 
 # from fastvideo.configs.sample import SamplingParam
 
@@ -11,7 +12,7 @@ def main():
     generator = VideoGenerator.from_pretrained(
         "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
         # FastVideo will automatically handle distributed setup
-        num_gpus=8,
+        num_gpus=4,
         use_fsdp_inference=False, # set to True if GPU is out of memory
         dit_cpu_offload=False,
         vae_cpu_offload=False,
@@ -29,18 +30,40 @@ def main():
         "wide with interest. The playful yet serene atmosphere is complemented by soft "
         "natural light filtering through the petals. Mid-shot, warm and cheerful tones."
     )
-    video = generator.generate_video(prompt, output_path=OUTPUT_PATH, save_video=True)
+    
+    warmup_iters=3
+    for _ in range(warmup_iters):
+        video = generator.generate_video(prompt, output_path=OUTPUT_PATH, save_video=False)
+    
+    outer_results = []
+    run_iters=3    
+    
+    for _ in range(run_iters):
+        results = generator.generate_video(prompt, output_path=OUTPUT_PATH, save_video=False, do_profiling=True)
+        for outer in results["outer"]:
+            outer_results.append(outer)
+    
+    for outer in outer_results:
+        get_global_time_profiler().merge_outer_results(outer)
+    
+    var_opts = set()
+    var_opts.add("head2sp")
+    var_opts.add("sp2head")
+    p_dict = {}
+    p_dict["sp2head"]=98
+    p_dict["head2sp"]=98
+    get_global_time_profiler().print_outer_results(var_opts, p_dict)
     # video = generator.generate_video(prompt, sampling_param=sampling_param, output_path="wan_t2v_videos/")
 
     # Generate another video with a different prompt, without reloading the
     # model!
-    prompt2 = (
-        "A majestic lion strides across the golden savanna, its powerful frame "
-        "glistening under the warm afternoon sun. The tall grass ripples gently in "
-        "the breeze, enhancing the lion's commanding presence. The tone is vibrant, "
-        "embodying the raw energy of the wild. Low angle, steady tracking shot, "
-        "cinematic.")
-    video2 = generator.generate_video(prompt2, output_path=OUTPUT_PATH, save_video=True)
+    # prompt2 = (
+    #     "A majestic lion strides across the golden savanna, its powerful frame "
+    #     "glistening under the warm afternoon sun. The tall grass ripples gently in "
+    #     "the breeze, enhancing the lion's commanding presence. The tone is vibrant, "
+    #     "embodying the raw energy of the wild. Low angle, steady tracking shot, "
+    #     "cinematic.")
+    # video2 = generator.generate_video(prompt2, output_path=OUTPUT_PATH, save_video=True)
 
 
 if __name__ == "__main__":

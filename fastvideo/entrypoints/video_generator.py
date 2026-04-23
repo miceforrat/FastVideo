@@ -386,6 +386,8 @@ class VideoGenerator:
         
         do_profiling = kwargs.get("do_profiling", False)
         batch.do_profiling = do_profiling
+        batch.memory_snapshot = kwargs.get("memory_snapshot", False)
+        batch.nvtx_profiling = kwargs.get("nvtx_profiling", False)
         # Run inference
         start_time = time.perf_counter()
 

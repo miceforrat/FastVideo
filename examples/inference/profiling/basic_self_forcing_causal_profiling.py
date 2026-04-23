@@ -90,7 +90,7 @@ def main():
     parser.add_argument(
         "--bs",
         type=int,
-        choices=[1, 2, 4],
+        choices=[1, 2, 4, 8],
         default=1,
         help="Batch size"
     )
@@ -130,13 +130,13 @@ def main():
     "natural light filtering through the petals. Mid-shot, warm and cheerful tones."
     prompts = [fake_prompt] * 2
     bs = args.bs
-    warmup_iters = 3
+    warmup_iters = 5
     for _ in range(warmup_iters):
         results = generator.generate_video(fake_prompt, output_path=OUTPUT_PATH, \
             save_video=False, sampling_param=sampling_param, num_videos_per_prompt=bs)
     
-    run_times = 3
-    gen_images_cnt = 1
+    run_times = 1
+    gen_images_cnt = 8
     # assert run_times % chunk_size == 0
     assert gen_images_cnt % bs == 0
     
@@ -154,15 +154,10 @@ def main():
     for i in range(run_times):
         start_time = time.time()
         for j in range(video_gen_times):
-            results = generator.generate_video(fake_prompt, output_path=OUTPUT_PATH, save_video=False, \
-                sampling_param=sampling_param, num_videos_per_prompt=bs, do_profiling=True)
-            # print(f"peak_memory_mb: {results["peak_memory_mb"]}; generation_time: {results["generation_time"]}")
-            # print(f"durations: {results["durations"]}")
-            # all_stage_durations.append(results["durations"])
-            # peak_memory_mbs.append(results["peak_memory_mb"])
-            # generate_times.append(results["generation_time"])
-            # kv_cache_mibs.append(results["kv_cache_mib"])
-            # crossattn_mibs.append(results["crossattn_mib"])
+            results = generator.generate_video(fake_prompt, output_path=OUTPUT_PATH, save_video=True, \
+                sampling_param=sampling_param, num_videos_per_prompt=bs, do_profiling=False,\
+                    memory_snapshot=False, nvtx_profiling=True)
+
             part_res = {}
             part_res["generation_time"] = results["generation_time"]
             part_res["peak_memory_mb"] = results["peak_memory_mb"]
@@ -193,9 +188,20 @@ def main():
     var_chunkwise_opts.add("ts_block_total")
     var_chunkwise_opts.add("ca_sp2head")
     var_chunkwise_opts.add("ca_head2sp")
+    var_chunkwise_opts.add("model_sharding")
+    var_chunkwise_opts.add("model_all_gather")
+    var_chunkwise_opts.add("ca_first_all2all")
+    var_chunkwise_opts.add("ca_second_all2all")
+    var_chunkwise_opts.add("ca_sp2headall2all_.+")
     p_dict = {}
-    p_dict["ts_block_total"]=99
-    p_dict["chunk_denoising_time"]=99
+    p_dict["ts_block_total"]=95
+    p_dict["chunk_denoising_time"]=95
+    p_dict["ca_sp2head"]=95
+    p_dict["ca_head2sp"]=95
+    p_dict["model_sharding"]=95
+    p_dict["model_all_gather"]=95
+    p_dict["ca_first_all2all"]=95
+    p_dict["ca_second_all2all"]=95
     get_global_time_profiler().print_chunkwise_results(calc_variance_set=var_chunkwise_opts,
                                                        calc_p_dict=p_dict)
     # start_time = time.time()

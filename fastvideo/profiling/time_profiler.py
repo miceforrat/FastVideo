@@ -4,6 +4,7 @@ from __future__ import annotations
 import torch
 import torch.distributed as dist
 import numpy as np
+import re
 
 _GLOBAL_TIME_PROFILER=None
 
@@ -28,17 +29,30 @@ class TimeProfiler():
         # self.rank_chunks = {}
         self.chunk_results = {}
         self.outer_results = {}
-        self.rank_profiling = {} # 控制局部profile
+        # self.rank_profiling = {} # 控制局部profile
+        self.block_profiling = False
+        self.ca_all2all_profiling = False
+        self.nvtx_sys_profiling=False
     
-    def set_rank_profiling(self, profiling: bool):
-        rank = _get_cur_rank()
-        self.rank_profiling[rank] = profiling
+    def set_nvtx_sys_profiling(self, profiling:bool):
+        self.nvtx_sys_profiling = profiling
     
-    def get_rank_profiling(self):
-        rank = _get_cur_rank()
-        if rank not in self.rank_profiling.keys():
-            self.rank_profiling[rank] = False
-        return self.rank_profiling[rank]
+    def set_ca_all2all_profiling(self, profiling: bool):
+        self.ca_all2all_profiling = profiling
+
+    def get_ca_all2all_profiling(self):
+        return self.ca_all2all_profiling
+
+    def set_block_profiling(self, profiling: bool):
+        # rank = _get_cur_rank()
+        self.block_profiling = profiling
+        # self.rank_profiling[rank] = profiling
+    
+    def get_block_profiling(self):
+        # rank = _get_cur_rank()
+        # if rank not in self.rank_profiling.keys():
+        #     self.rank_profiling[rank] = False
+        return self.block_profiling
     
     def set_time_profile(self, time_profile:bool):
         self.time_profile = time_profile
@@ -63,17 +77,24 @@ class TimeProfiler():
         # 提交更全局的统计信息
         _submit_to_list_dict(info, self.outer_results)
     
+    def clear(self):
+        self.chunk_results={}
+        self.outer_results={}
+    
     def print_chunkwise_results(self,
                                 calc_variance_set: set = None,
                                 calc_p_dict: dict[str, int]= None):
         """
-            calc_variance_set：需要计算方差的key
-            calc_p_dict：需要计算尾部数据的dict
+            calc_variance_set：需要计算方差的key,是正则表达式(所以尽量不要用那些有特殊含义的字符)
+            calc_p_dict：需要计算尾部数据的dict,暂时不支持正则
         """
         
         res_names = ["chunk_idx"]
         res_vals = []
         num_added = False
+        if calc_variance_set is not None:
+            variance_combined = re.compile("|".join(f"(?:{p})" for p in calc_variance_set))
+        
         for idx in self.chunk_results.keys():
             cur_chunk_res = [idx]
             for key in self.chunk_results[idx].keys():
@@ -81,11 +102,11 @@ class TimeProfiler():
                     res_names.append(key)
                 data_list = self.chunk_results[idx][key]
                 cur_chunk_res.append(np.mean(data_list))
-                if key in calc_variance_set:
+                if calc_variance_set is not None and bool(variance_combined.search(key)):
                     if not num_added:
                         res_names.append(f"{key}_variance")
                     cur_chunk_res.append(np.var(data_list))
-                if key in calc_p_dict:
+                if calc_p_dict is not None and key in calc_p_dict:
                     threshold = calc_p_dict[key]
                     if not num_added:
                         res_names.append(f"{key}_p{threshold}")
@@ -96,12 +117,22 @@ class TimeProfiler():
         for chunk_res in res_vals:
             print("\t".join(str(x) for x in chunk_res))
     
-    def print_outer_results(self):
+    def print_outer_results(self,  calc_variance_set: set = None, calc_p_dict: dict[str, int]= None):
         res_names = []
         res_vals = []
+        if calc_variance_set is not None:
+            variance_combined = re.compile("|".join(f"(?:{p})" for p in calc_variance_set))
         for key in self.outer_results.keys():
             res_names.append(key)
-            res_vals.append(np.mean(self.outer_results[key]))
+            data_list = self.outer_results[key]
+            res_vals.append(np.mean(data_list))
+            if calc_variance_set is not None and bool(variance_combined.search(key)):
+                res_names.append(f"{key}_variance")
+                res_vals.append(np.var(data_list))
+            if calc_p_dict is not None and key in calc_p_dict:
+                threshold = calc_p_dict[key]
+                res_names.append(f"{key}_p{threshold}")
+                res_vals.append(np.percentile(data_list, threshold))            
         print("\t".join(res_names))
         print("\t".join(str(x) for x in res_vals))
     
@@ -117,7 +148,6 @@ class TimeProfiler():
                     self.chunk_results[idx][key] = self.chunk_results[idx][key] + other_chunkwise_results[idx][key]
     
     def merge_outer_results(self, other_outer_results):
-        print(f"other outer res:")
         for key in other_outer_results.keys():
             if key not in self.outer_results.keys():
                 self.outer_results[key] = other_outer_results[key]

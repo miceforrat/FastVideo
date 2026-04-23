@@ -30,6 +30,7 @@ import torch
 from fastvideo.distributed.parallel_state import get_sp_group
 from fastvideo.layers.custom_op import CustomOp
 from fastvideo.logger import init_logger
+import torch.cuda.nvtx as nvtx
 
 logger = init_logger(__name__)
 
@@ -347,6 +348,7 @@ def get_nd_rotary_pos_embed(
     dtype: torch.dtype = torch.float32,
     start_frame: int = 0,
     use_real: bool = True,
+    device: torch.device | str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     This is a n-d version of precompute_freqs_cis, which is a RoPE for tokens with n-d structure.
@@ -371,7 +373,8 @@ def get_nd_rotary_pos_embed(
     """
     # Get the full grid
     full_grid = get_meshgrid_nd(start, *args, dim=len(rope_dim_list))  # [3, W, H, D] / [2, W, H]
-
+    if device is not None:
+        full_grid = full_grid.to(device)
     if start_frame > 0:
         full_grid[0] += start_frame
 
@@ -399,12 +402,15 @@ def get_nd_rotary_pos_embed(
         # Shard the grid
         # Update grid shape for the sharded dimension
         grid_shape[shard_dim] = grid_shape[shard_dim] // sp_world_size
-        grid = torch.empty((len(rope_dim_list), ) + tuple(grid_shape), dtype=full_grid.dtype)
+        grid = torch.empty((len(rope_dim_list), ) + tuple(grid_shape), dtype=full_grid.dtype,device=full_grid.device,)
         for i in range(len(rope_dim_list)):
             grid[i] = full_grid[i][tuple(slice_indices)]
     else:
         grid = full_grid
-
+        
+    if device is not None and grid.device != torch.device(device):
+        grid = grid.to(device)
+        
     if isinstance(theta_rescale_factor, int | float):
         theta_rescale_factor = [theta_rescale_factor] * len(rope_dim_list)
     elif isinstance(theta_rescale_factor, list) and len(theta_rescale_factor) == 1:
@@ -420,23 +426,72 @@ def get_nd_rotary_pos_embed(
         rope_dim_list), "len(interpolation_factor) should equal to len(rope_dim_list)"
 
     # use 1/ndim of dimensions to encode grid_axis
-    embs = []
-    for i in range(len(rope_dim_list)):
-        emb = get_1d_rotary_pos_embed(
-            rope_dim_list[i],
-            grid[i].reshape(-1),
-            theta,
-            theta_rescale_factor=theta_rescale_factor[i],
-            interpolation_factor=interpolation_factor[i],
-            dtype=dtype,
-            use_real=use_real,
-        )  # 2 x [WHD, rope_dim_list[i]] or 2 x [WHD, rope_dim_list[i]*2] if use_real
-        embs.append(emb)
+    # embs = []
+    # for i in range(len(rope_dim_list)):
+    #     emb = get_1d_rotary_pos_embed(
+    #         rope_dim_list[i],
+    #         grid[i].reshape(-1),
+    #         theta,
+    #         theta_rescale_factor=theta_rescale_factor[i],
+    #         interpolation_factor=interpolation_factor[i],
+    #         dtype=dtype,
+    #         use_real=use_real,
+    #     )  # 2 x [WHD, rope_dim_list[i]] or 2 x [WHD, rope_dim_list[i]*2] if use_real
+    #     embs.append(emb)
 
-    cos = torch.cat([emb[0] for emb in embs], dim=1)  # (WHD, D) or (WHD, D/2)
-    sin = torch.cat([emb[1] for emb in embs], dim=1)  # (WHD, D) or (WHD, D/2)
+    # cos = torch.cat([emb[0] for emb in embs], dim=1)  # (WHD, D) or (WHD, D/2)
+    # sin = torch.cat([emb[1] for emb in embs], dim=1)  # (WHD, D) or (WHD, D/2)
+    
+    nvtx.range_push("alltogether_cos_sin_compute")
+    S = grid[0].numel()  # WHD
+    D = sum(rope_dim_list)
+
+    cos = torch.empty((S, D), device=grid.device, dtype=dtype)
+    sin = torch.empty((S, D), device=grid.device, dtype=dtype)
+    offset = 0
+
+    for i in range(len(rope_dim_list)):
+        dim_i = rope_dim_list[i]
+        pos_i = grid[i].reshape(-1)
+
+        # === 原 get_1d_rotary_pos_embed 逻辑（inline） ===
+
+        if theta_rescale_factor[i] != 1.0:
+            theta_i = theta * theta_rescale_factor[i] ** (dim_i / (dim_i - 2))
+        else:
+            theta_i = theta
+
+        # freq base
+        freq = torch.arange(0, dim_i, 2, device=pos_i.device, dtype=dtype)
+        freq = 1.0 / (theta_i ** (freq / dim_i))  # [D/2]
+
+        # outer
+        f = torch.outer(pos_i * interpolation_factor[i], freq)  # [S, D/2]
+
+        c = f.cos()
+        s = f.sin()
+
+        # === 替换 repeat_interleave ===
+        if use_real:
+            # 原来: repeat_interleave(2)
+            cos[:, offset:offset+dim_i][:, 0::2] = c
+            cos[:, offset:offset+dim_i][:, 1::2] = c
+            sin[:, offset:offset+dim_i][:, 0::2] = s
+            sin[:, offset:offset+dim_i][:, 1::2] = s
+        else:
+            cos[:, offset:offset+dim_i//2] = c
+            sin[:, offset:offset+dim_i//2] = s
+        offset += dim_i
+    nvtx.range_pop()
     return cos, sin
 
+_GLOBAL_ROPE_CACHE=None
+
+def get_global_rope_cache():
+    global _GLOBAL_ROPE_CACHE
+    if _GLOBAL_ROPE_CACHE is None:
+        _GLOBAL_ROPE_CACHE = {}
+    return _GLOBAL_ROPE_CACHE
 
 def get_rotary_pos_embed(
     rope_sizes,
@@ -451,6 +506,8 @@ def get_rotary_pos_embed(
     dtype: torch.dtype = torch.float32,
     start_frame: int = 0,
     use_real: bool = True,
+    use_cache: bool = False,
+    device: torch.device | str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Generate rotary positional embeddings for the given sizes.
@@ -470,7 +527,8 @@ def get_rotary_pos_embed(
     Returns:
         Tuple of (cos, sin) tensors for rotary embeddings. Shape [S, D] if use_real, [S, D/2] otherwise.
     """
-
+#     print(f"get_rotary_pos_embed args rope_sizes:{rope_sizes}; hidden_size: {hidden_size}; heads_num: {heads_num}; \
+# rope_dim_list: {rope_dim_list}; dtype: {dtype}; start_frame: {start_frame}")
     target_ndim = 3
     head_dim = hidden_size // heads_num
 
@@ -488,19 +546,60 @@ def get_rotary_pos_embed(
         sp_rank = 0
         sp_world_size = 1
 
-    freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
-        rope_dim_list,
-        rope_sizes,
-        theta=rope_theta,
-        theta_rescale_factor=theta_rescale_factor,
-        interpolation_factor=interpolation_factor,
-        shard_dim=shard_dim,
-        sp_rank=sp_rank,
-        sp_world_size=sp_world_size,
-        dtype=dtype,
-        start_frame=start_frame,
-        use_real=use_real,
-    )
+    if use_cache:
+        def _to_hashable(x):
+            if isinstance(x, list):
+                return tuple(_to_hashable(i) for i in x)
+            if isinstance(x, dict):
+                # dict 也要处理（排序保证顺序一致）
+                return tuple(sorted((k, _to_hashable(v)) for k, v in x.items()))
+            return x
+        
+        key = (_to_hashable(rope_dim_list),
+               _to_hashable(rope_sizes),
+               rope_theta,
+               theta_rescale_factor,
+               interpolation_factor,
+               shard_dim,
+               sp_rank,
+               sp_world_size,
+               dtype,
+               start_frame,
+               use_real)
+        rope_cache = get_global_rope_cache()
+        if key not in rope_cache:
+            freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
+                rope_dim_list,
+                rope_sizes,
+                theta=rope_theta,
+                theta_rescale_factor=theta_rescale_factor,
+                interpolation_factor=interpolation_factor,
+                shard_dim=shard_dim,
+                sp_rank=sp_rank,
+                sp_world_size=sp_world_size,
+                dtype=dtype,
+                start_frame=start_frame,
+                use_real=use_real,
+                device=device
+            )
+            rope_cache[key] = (freqs_cos.detach().cpu(), freqs_sin.detach().cpu())
+        (freqs_cos, freqs_sin) = rope_cache[key]
+
+    else:
+        freqs_cos, freqs_sin = get_nd_rotary_pos_embed(
+            rope_dim_list,
+            rope_sizes,
+            theta=rope_theta,
+            theta_rescale_factor=theta_rescale_factor,
+            interpolation_factor=interpolation_factor,
+            shard_dim=shard_dim,
+            sp_rank=sp_rank,
+            sp_world_size=sp_world_size,
+            dtype=dtype,
+            start_frame=start_frame,
+            use_real=use_real,
+            device=device
+        )
     return freqs_cos, freqs_sin
 
 
