@@ -41,6 +41,8 @@ from fastvideo.distributed.communication_op import (
     sequence_model_parallel_shard,
     sequence_model_parallel_all_to_all_4D)
 
+from fastvideo.profiling.small_node_profiler import get_current_simple_profiler
+
 logger = init_logger(__name__)
 class CausalWanSelfAttention(nn.Module):
 
@@ -210,7 +212,12 @@ class CausalWanDistributedSelfAttention(nn.Module):
         self.max_attention_size = 32760 if local_attn_size == -1 else local_attn_size * 1560
 
         # Scaled dot product attention
-        sp_world_size = get_sp_world_size()
+        try:
+            ws = get_sp_world_size()
+            sp_world_size = ws if ws is not None else 1
+        except Exception:
+            sp_world_size = 1
+        # sp_world_size = get_sp_world_size()
         assert num_heads % sp_world_size == 0
         self.local_num_heads = num_heads // sp_world_size
 
@@ -223,57 +230,11 @@ class CausalWanDistributedSelfAttention(nn.Module):
             supported_attention_backends=(
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TORCH_SDPA,
-            ),
+            )
+            # no_mask_varlen=True
         )
 
-    def _get_events(self):
-        rank_profiling = get_global_time_profiler().get_block_profiling()
-        return {
-            "ca_sp2head_start":TimeProfilingEvent(rank_profiling),
-            "ca_first_all2all_end": TimeProfilingEvent(rank_profiling),
-            "ca_second_all2all_end": TimeProfilingEvent(rank_profiling),
-            "ca_sp2head_end":TimeProfilingEvent(rank_profiling),
-            "ca_get_qkv_end":TimeProfilingEvent(rank_profiling),
-            "ca_rope_end":TimeProfilingEvent(rank_profiling),
-            "ca_calculation_end":TimeProfilingEvent(rank_profiling),
-            "ca_head2sp_start":TimeProfilingEvent(rank_profiling),       
-            "ca_head2sp_end":TimeProfilingEvent(rank_profiling)            
-        }
-
-    def _submit_profiling_results(self, events:dict[str, TimeProfilingEvent]):
-        if get_global_time_profiler().get_block_profiling():
-            torch.cuda.synchronize()
-            results = {}
-            results["ca_sp2head"] = events["ca_sp2head_start"].elapsed_time(events["ca_sp2head_end"])
-            results["ca_get_qkv"] = events["ca_sp2head_end"].elapsed_time(events["ca_get_qkv_end"])
-            results["ca_rope"] = events["ca_get_qkv_end"].elapsed_time(events["ca_rope_end"])
-            results["ca_calculation"] = events["ca_rope_end"].elapsed_time(events["ca_calculation_end"])
-            results["ca_head2sp"] = events["ca_head2sp_start"].elapsed_time(events["ca_head2sp_end"]) 
-            results["ca_first_all2all"]=events["ca_sp2head_start"].elapsed_time(events["ca_first_all2all_end"])
-            results["ca_second_all2all"]=events["ca_first_all2all_end"].elapsed_time(events["ca_second_all2all_end"])
-            get_global_time_profiler().submit_by_chunk(results)
-            
     def forward(self, 
-                q: torch.Tensor,
-                k: torch.Tensor,
-                v: torch.Tensor,
-                freqs_cis: tuple[torch.Tensor, torch.Tensor],
-                block_mask: BlockMask,
-                original_seq_len: int,
-                kv_cache: dict | None = None,
-                current_start: int = 0,
-                cache_start: int | None = None,
-                profiling: bool = False):
-        
-        if get_global_time_profiler().nvtx_sys_profiling:
-            with nvtx.range(f"rank_{dist.get_rank()}_dist_causal_attn"):       
-                res= self._forward(q, k,v,freqs_cis, block_mask, original_seq_len, kv_cache, current_start, cache_start, profiling)
-        else:
-            res= self._forward(q, k,v,freqs_cis, block_mask, original_seq_len, kv_cache, current_start, cache_start, profiling)
-        return res
-        
-            
-    def _forward(self, 
                 q: torch.Tensor,
                 k: torch.Tensor,
                 v: torch.Tensor,
@@ -298,7 +259,6 @@ class CausalWanDistributedSelfAttention(nn.Module):
         # qkv = torch.cat([q, k, v], dim=0)
         # if profiling:
 
-        events: dict[str, TimeProfilingEvent] = self._get_events()
         # all2all_go_start.record()
         # qkv = sequence_model_parallel_all_to_all_4D(qkv, scatter_dim=2, gather_dim=1)
         # all2all_go_end.record()
@@ -306,45 +266,29 @@ class CausalWanDistributedSelfAttention(nn.Module):
         # qkv = qkv[:, :original_seq_len, :, :]
         # q, k, v = qkv.chunk(3, dim=0)
         # to_qkv_end.record()
-        # else:
-        #     qkv = sequence_model_parallel_all_to_all_4D(qkv, scatter_dim=2, gather_dim=1)
-        #     pad_seq_len = qkv.shape[1] - original_seq_len
-        #     qkv = qkv[:, :original_seq_len, :, :]
-        #     q, k, v = qkv.chunk(3, dim=0)
-        # if profiling:
-        #     all2all_go_start = torch.cuda.Event(enable_timing=True)
-        #     all2all_go_end = torch.cuda.Event(enable_timing=True)
-        #     all2all_go_start.record()
 
-        #     q = sequence_model_parallel_all_to_all_4D(q, scatter_dim=2, gather_dim=1)
-        #     k = sequence_model_parallel_all_to_all_4D(k, scatter_dim=2, gather_dim=1)
-        #     v = sequence_model_parallel_all_to_all_4D(v, scatter_dim=2, gather_dim=1)
+        qkv = torch.cat([q, k, v], dim=0)
+        get_current_simple_profiler().enter("qkv_sp2head_all2all")
+        qkv = sequence_model_parallel_all_to_all_4D(qkv, scatter_dim=2, gather_dim=1)
+        get_current_simple_profiler().exit()
+        pad_seq_len = qkv.shape[1] - original_seq_len
+        qkv = qkv[:, :original_seq_len, :, :]
+        q, k, v = qkv.chunk(3, dim=0)
+        
+        # q = sequence_model_parallel_all_to_all_4D(q, scatter_dim=2, gather_dim=1)
+        # k = sequence_model_parallel_all_to_all_4D(k, scatter_dim=2, gather_dim=1)
+        # v = sequence_model_parallel_all_to_all_4D(v, scatter_dim=2, gather_dim=1)
+        
+        # pad_seq_len = q.shape[1] - original_seq_len
 
-        #     all2all_go_end.record()
-        # else:
-        events["ca_sp2head_start"].record()
-        with nvtx.range(f"rank_{dist.get_rank()}_qkv_sp2head"):
-            get_global_time_profiler().set_ca_all2all_profiling(True)
-            q = sequence_model_parallel_all_to_all_4D(q, scatter_dim=2, gather_dim=1)
-            events["ca_first_all2all_end"].record()
-            get_global_time_profiler().set_ca_all2all_profiling(False)
-            
-            k = sequence_model_parallel_all_to_all_4D(k, scatter_dim=2, gather_dim=1)
-            events["ca_second_all2all_end"].record()
-            v = sequence_model_parallel_all_to_all_4D(v, scatter_dim=2, gather_dim=1)
-            events["ca_sp2head_end"].record()
-            
-            pad_seq_len = q.shape[1] - original_seq_len
-
-            q = q[:, :original_seq_len, :, :]
-            k = k[:, :original_seq_len, :, :]
-            v = v[:, :original_seq_len, :, :]
-        events["ca_get_qkv_end"].record()
-
+        # q = q[:, :original_seq_len, :, :]
+        # k = k[:, :original_seq_len, :, :]
+        # v = v[:, :original_seq_len, :, :]
+        get_current_simple_profiler().enter("apply_rotary_emb")
         cos, sin = freqs_cis
         roped_query = _apply_rotary_emb(q, cos, sin, is_neox_style=False).type_as(v)
         roped_key = _apply_rotary_emb(k, cos, sin, is_neox_style=False).type_as(v)
-        events["ca_rope_end"].record()
+        get_current_simple_profiler().exit()
         if kv_cache is None:
             # Padding for flex attention
             padded_length = math.ceil(q.shape[1] / 128) * 128 - q.shape[1]
@@ -375,6 +319,7 @@ class CausalWanDistributedSelfAttention(nn.Module):
             )[:, :, :-padded_length].transpose(2, 1)
             
         else:
+            get_current_simple_profiler().enter("maintaining_kv_cache")
             frame_seqlen = q.shape[1]
             current_end = current_start + roped_query.shape[1]
             sink_tokens = self.sink_size * frame_seqlen
@@ -417,11 +362,22 @@ class CausalWanDistributedSelfAttention(nn.Module):
                 # logger.info("kv_cache['k'] is in comp graph: %s", kv_cache["k"].requires_grad or kv_cache["k"].grad_fn is not None)
                 kv_cache["k"][:, local_start_index:local_end_index] = roped_key
                 kv_cache["v"][:, local_start_index:local_end_index] = v
+            get_current_simple_profiler().exit()
+            ctx_k = kv_cache["k"][:, max(0, local_end_index - self.max_attention_size):local_end_index]
+            ctx_v = kv_cache["v"][:, max(0, local_end_index - self.max_attention_size):local_end_index]
+            # logger.info(f"roped_q {roped_query.shape}, dtype={roped_query.dtype}, elem={roped_query.element_size()}")
+            # logger.info(f"ctx_k {ctx_k.shape}, dtype={ctx_k.dtype}, elem={ctx_k.element_size()}")
+            # logger.info(f"ctx_v {ctx_v.shape}, dtype={ctx_v.dtype}, elem={ctx_v.element_size()}")
+            # logger.info(f"q_is_contig {roped_query.is_contiguous()}, k_is_contig {ctx_k.is_contiguous()}, v_is_contig {ctx_v.is_contiguous()}")
+            # logger.info(f"q_stride {roped_query.stride()}, k_stride {ctx_k.stride()}, v_stride {ctx_v.stride()}")
+            get_current_simple_profiler().enter("real_attn")
             x = self.attn(
                 roped_query,
-                kv_cache["k"][:, max(0, local_end_index - self.max_attention_size):local_end_index],
-                kv_cache["v"][:, max(0, local_end_index - self.max_attention_size):local_end_index]
+                ctx_k,
+                ctx_v
             )
+            get_current_simple_profiler().exit()
+            # logger.info(f"out {x.shape}, dtype={x.dtype}, elem={x.element_size()}")
             if isinstance(kv_cache["global_end_index"], torch.Tensor):
                 kv_cache["global_end_index"].fill_(current_end)
             else:
@@ -430,13 +386,11 @@ class CausalWanDistributedSelfAttention(nn.Module):
                 kv_cache["local_end_index"].fill_(local_end_index)
             else:
                 kv_cache["local_end_index"] = local_end_index
-        events["ca_calculation_end"].record()
         # 4) full-seq/local-heads -> local-seq/full-heads
         x = torch.nn.functional.pad(x, (0, 0, 0, 0, 0, pad_seq_len))
-        events["ca_head2sp_start"].record()
+        get_current_simple_profiler().enter("out_head2sp_all2all")
         x = sequence_model_parallel_all_to_all_4D(x, scatter_dim=1, gather_dim=2)
-        events["ca_head2sp_end"].record() 
-        self._submit_profiling_results(events)
+        get_current_simple_profiler().exit()
         return x
 
 class CausalWanTransformerBlock(nn.Module):
@@ -525,6 +479,7 @@ class CausalWanTransformerBlock(nn.Module):
     ) -> torch.Tensor:
         # hidden_states.shape: [batch_size, seq_length, inner_dim]
         # temb.shape: [batch_size, num_frames, 6, inner_dim]
+        get_current_simple_profiler().enter("prepare")
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)
         num_frames = temb.shape[1]
@@ -537,18 +492,35 @@ class CausalWanTransformerBlock(nn.Module):
         assert e.shape == (bs, num_frames, 6, self.hidden_dim)
         shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = e.chunk(
             6, dim=2)
+        get_current_simple_profiler().exit()
         # *_msa.shape: [batch_size, num_frames, 1, inner_dim]
         # assert shift_msa.dtype == torch.float32
 
         # 1. Self-attention
+        get_current_simple_profiler().enter("self_attn")
+        get_current_simple_profiler().enter("hs_norm")
         norm_hidden_states = (self.norm1(hidden_states).unflatten(dim=1, sizes=(num_frames, frame_seqlen)) *
                         (1 + scale_msa) + shift_msa).flatten(1, 2)
+        get_current_simple_profiler().exit()
+        
+        get_current_simple_profiler().enter("to_q")
         query, _ = self.to_q(norm_hidden_states)
+
+        get_current_simple_profiler().exit()
+        
+        get_current_simple_profiler().enter("to_k")
         key, _ = self.to_k(norm_hidden_states)
+        get_current_simple_profiler().exit()
+        
+        get_current_simple_profiler().enter("to_v")
         value, _ = self.to_v(norm_hidden_states)
+        get_current_simple_profiler().exit()
 
         if self.norm_q is not None:
+            get_current_simple_profiler().enter("q_rms_norm")
             query = self.norm_q.forward_native(query)
+            get_current_simple_profiler().exit()
+            
         if self.norm_k is not None:
             key = self.norm_k.forward_native(key)
 
@@ -556,9 +528,14 @@ class CausalWanTransformerBlock(nn.Module):
         key = key.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
         value = value.squeeze(1).unflatten(2, (self.num_attention_heads, -1))
 
+        get_current_simple_profiler().enter("core_attn")
         attn_output = self.attn1(query, key, value, freqs_cis, block_mask,original_seq_len, kv_cache, current_start, cache_start)
+        get_current_simple_profiler().exit()
+        
         attn_output = attn_output.flatten(2)
+        get_current_simple_profiler().enter("to_out")
         attn_output, _ = self.to_out(attn_output)
+        get_current_simple_profiler().exit()
         attn_output = attn_output.squeeze(1)
 
         null_shift = null_scale = torch.tensor([0], device=hidden_states.device)
@@ -567,16 +544,23 @@ class CausalWanTransformerBlock(nn.Module):
         norm_hidden_states, hidden_states = norm_hidden_states.to(
             orig_dtype), hidden_states.to(orig_dtype)
 
+        get_current_simple_profiler().exit()
+        
         # 2. Cross-attention
+        get_current_simple_profiler().enter("cross_attn_core")
         attn_output = self.attn2(norm_hidden_states,
                                  context=encoder_hidden_states,
                                  context_lens=None,
                                  crossattn_cache=crossattn_cache)
+        get_current_simple_profiler().exit()
         norm_hidden_states, hidden_states = self.cross_attn_residual_norm(
             hidden_states, attn_output, 1, c_shift_msa, c_scale_msa)
 
         # 3. Feed-forward
+        get_current_simple_profiler().enter("ffn")
         ff_output = self.ffn(norm_hidden_states)
+        get_current_simple_profiler().exit()
+        
         hidden_states = self.mlp_residual(hidden_states, ff_output, c_gate_msa)
 
         return hidden_states
@@ -712,25 +696,6 @@ class CausalWanTransformer3DModel(BaseDiT):
         # imageio.imwrite("mask_%d.jpg" % (0), np.uint8(255. * mask))
 
         return block_mask
-
-    def _get_profiling_events(self):
-        return {
-            "model_sharding_start":TimeProfilingEvent(),
-            "model_sharding_end":TimeProfilingEvent(),
-            "model_blocks_start":TimeProfilingEvent(),
-            "model_blocks_end":TimeProfilingEvent(),
-            "model_all_gather_start":TimeProfilingEvent(),
-            "model_all_gather_end":TimeProfilingEvent()
-        }
-        
-    def _submit_profiling_res(self, events:dict[str, TimeProfilingEvent]):
-        if get_global_time_profiler().time_profile:
-            torch.cuda.synchronize()
-            results = {}
-            results["model_sharding"] = events["model_sharding_start"].elapsed_time(events["model_sharding_end"])
-            results["model_blocks"] = events["model_blocks_start"].elapsed_time(events["model_blocks_end"])
-            results["model_all_gather"] = events["model_all_gather_start"].elapsed_time(events["model_all_gather_end"])
-            get_global_time_profiler().submit_by_chunk(results)
     
     def _forward_inference(
                 self,
@@ -751,8 +716,6 @@ class CausalWanTransformer3DModel(BaseDiT):
         This function will be run for num_frame times.
         Process the latent frames one by one (1560 tokens each)
         """
-        nvtx.range_push("dit_pre_meta")
-        events = self._get_profiling_events()
         orig_dtype = hidden_states.dtype
         if not isinstance(encoder_hidden_states, torch.Tensor):
             encoder_hidden_states = encoder_hidden_states[0]
@@ -768,13 +731,10 @@ class CausalWanTransformer3DModel(BaseDiT):
         post_patch_num_frames = num_frames // p_t
         post_patch_height = height // p_h
         post_patch_width = width // p_w
-        nvtx.range_pop()
         
-        nvtx.range_push("pre_rope")
         # Get rotary embeddings
         d = self.hidden_size // self.num_attention_heads
         rope_dim_list = [d - 4 * (d // 6), 2 * (d // 6), 2 * (d // 6)]
-        nvtx.range_push("rope_pos_embed")
         freqs_cos, freqs_sin = get_rotary_pos_embed(
             (post_patch_num_frames, post_patch_height,
              post_patch_width),
@@ -786,49 +746,34 @@ class CausalWanTransformer3DModel(BaseDiT):
             start_frame=start_frame, # Assume that start_frame is 0 when kv_cache is None
             device=hidden_states.device
         )
-        nvtx.range_pop()
         
-        nvtx.range_push("rope_to_device")
         freqs_cos = freqs_cos.to(hidden_states.device)
         freqs_sin = freqs_sin.to(hidden_states.device)
         freqs_cis = (freqs_cos,
                      freqs_sin) if freqs_cos is not None else None
-        nvtx.range_pop()
-        nvtx.range_pop()
 
-        nvtx.range_push("dit_patch_embedding")
         hidden_states = self.patch_embedding(hidden_states)
-        nvtx.range_pop()
         
         # logger.info(f"hs size before grid_sizes: {hidden_states.shape}")
         # grid_sizes = torch.stack(
         #     [torch.tensor(hidden_states[0].shape[1:], dtype=torch.long)])
         
-        nvtx.range_push(f"dit_pre_patch_rearrange")
         grid_size = torch.tensor(hidden_states[0].shape[1:], dtype=torch.long, device=hidden_states.device)
         grid_sizes = grid_size.unsqueeze(0).repeat(batch_size, 1)
         hidden_states = hidden_states.flatten(2).transpose(1, 2)
-        nvtx.range_pop()
         
-        nvtx.range_push(f"dit_pre_sp_shard")
+        get_current_simple_profiler().enter("model_sharding")
         # try doing sharding
-        events["model_sharding_start"].record()
         hidden_states, original_seq_len = sequence_model_parallel_shard(hidden_states, dim=1)
-        events["model_sharding_end"].record()
-        torch.cuda.nvtx.range_pop()
+        get_current_simple_profiler().exit()
 
-        nvtx.range_push(f"dit_pre_text_pad")
         encoder_hidden_states = torch.cat([encoder_hidden_states, \
             encoder_hidden_states.new_zeros(encoder_hs_bs, self.text_len - encoder_hidden_states.size(1), encoder_hidden_states.size(2))], dim=1)
-        torch.cuda.nvtx.range_pop()
 
-        nvtx.range_push(f"dit_pre_condition_embed")
         temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image = self.condition_embedder(
                         timestep.flatten(), encoder_hidden_states, encoder_hidden_states_image)
         timestep_proj = timestep_proj.unflatten(1, (6, self.hidden_size)).unflatten(dim=0, sizes=timestep.shape)
-        nvtx.range_pop()
 
-        torch.cuda.nvtx.range_push(f"dit_pre_ctx_finalize")
         if encoder_hidden_states_image is not None:
             encoder_hidden_states = torch.concat(
                 [encoder_hidden_states_image, encoder_hidden_states], dim=1)
@@ -838,10 +783,10 @@ class CausalWanTransformer3DModel(BaseDiT):
             ) else encoder_hidden_states  # cast to orig_dtype for MPS
 
         assert encoder_hidden_states.dtype == orig_dtype
-        nvtx.range_pop()
 
         # 4. Transformer blocks
-        events["model_blocks_start"].record()
+        # events["model_blocks_start"].record()
+        get_current_simple_profiler().enter("dit_blocks")
         for block_index, block in enumerate(self.blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 causal_kwargs = {
@@ -867,22 +812,26 @@ class CausalWanTransformer3DModel(BaseDiT):
                 hidden_states = block(hidden_states, encoder_hidden_states,
                                         timestep_proj, freqs_cis,
                                         **causal_kwargs)
-        events["model_blocks_end"].record()
+        get_current_simple_profiler().exit()
+        
+        # events["model_blocks_end"].record()
         # 5. Output norm, projection & unpatchify
         temb = temb.unflatten(dim=0, sizes=timestep.shape).unsqueeze(2)
         shift, scale = (self.scale_shift_table.unsqueeze(1) + temb).chunk(2,
                                                                     dim=2)
         hidden_states = self.norm_out(hidden_states, shift, scale)
-        events["model_all_gather_start"].record()
+        # events["model_all_gather_start"].record()
+        get_current_simple_profiler().enter("all_gather")
         hidden_states = sequence_model_parallel_all_gather_with_unpad(
             hidden_states, original_seq_len, dim=1
         )
-        events["model_all_gather_end"].record()
+        get_current_simple_profiler().exit()
+        # events["model_all_gather_end"].record()
         
         hidden_states = self.proj_out(hidden_states)
 
         output = self.unpatchify(hidden_states, grid_sizes)
-        self._submit_profiling_res(events)
+        # self._submit_profiling_res(events)
         return torch.stack(output)
 
     def _forward_train(self,
@@ -982,25 +931,27 @@ class CausalWanTransformer3DModel(BaseDiT):
 
         return torch.stack(output)
 
+    # def forward(
+    #     self,
+    #     *args,
+    #     **kwargs
+    # ):
+    #     with nvtx.range("dit_forward"):
+    #         res = self._forward(*args, **kwargs)
+    #     return res
+        
     def forward(
         self,
         *args,
         **kwargs
     ):
-        with nvtx.range("dit_forward"):
-            res = self._forward(*args, **kwargs)
-        return res
-        
-    def _forward(
-        self,
-        *args,
-        **kwargs
-    ):
+        get_current_simple_profiler().enter("dit_forward")
         if kwargs.get('kv_cache', None) is not None:
-            return self._forward_inference(*args, **kwargs)
+            res= self._forward_inference(*args, **kwargs)
         else:
-            return self._forward_train(*args, **kwargs)
-
+            res= self._forward_train(*args, **kwargs)
+        get_current_simple_profiler().exit()
+        return res
 
     def unpatchify(self, x, grid_sizes):
         r"""

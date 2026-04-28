@@ -25,6 +25,7 @@ from fastvideo.pipelines.stages import PipelineStage
 import fastvideo.envs as envs
 from fastvideo.utils import (maybe_download_model, verify_model_config_and_directory)
 from fastvideo.profiling.time_profiler import get_global_time_profiler
+from fastvideo.profiling.small_node_profiler import get_current_simple_profiler
 import time
 
 logger = init_logger(__name__)
@@ -445,9 +446,9 @@ class ComposedPipelineBase(ABC):
             ForwardBatch: The batch with the generated video or image.
         """
 
-        get_global_time_profiler().set_time_profile(batch.do_profiling)
-        get_global_time_profiler().set_nvtx_sys_profiling(batch.nvtx_profiling)
-        get_global_time_profiler().clear()
+
+        get_current_simple_profiler().set_module_profiling(batch.do_profiling)
+        get_current_simple_profiler().set_nvtx_profiling(batch.nvtx_profiling)
         if batch.memory_snapshot:
             torch.cuda.memory._record_memory_history(enabled=True, trace_alloc_max_entries=200000)
         
@@ -460,14 +461,18 @@ class ComposedPipelineBase(ABC):
         start_time = time.perf_counter()
         last_time = start_time
         # try:
+        get_current_simple_profiler().enter("pipeline_stages")
         for stage in self.stages:
+            get_current_simple_profiler().enter(type(stage).__name__)
             batch = stage(batch, fastvideo_args)
             end_time = time.perf_counter()
             duration = end_time-last_time
             last_time = end_time
             # stages_duration.append(duration)
             stages_duration_dict[type(stage).__name__] = duration
+            get_current_simple_profiler().exit()
         # batch.extra["durations"] = stages_duration
+        get_current_simple_profiler().exit(sync_and_calc_durations=True)
         if batch.memory_snapshot:
             torch.cuda.memory._dump_snapshot(f"logs/snapshots/snapshot_rank_{dist.get_rank()}.pickle")
         
@@ -475,8 +480,7 @@ class ComposedPipelineBase(ABC):
             get_global_time_profiler().submit_outer(stages_duration_dict)
         
         # print(f"fastvideo_args: {fastvideo_args}")
-        batch.extra["outer"] = get_global_time_profiler().outer_results
-        batch.extra["chunkwise"] = get_global_time_profiler().chunk_results
+        batch.extra["module_profiles_dict"] = get_current_simple_profiler().collect_all_nodes_as_dict()
         return batch
 
     def train(self) -> None:

@@ -33,7 +33,12 @@ import numpy as np
 import torch
 from torchvision.utils import make_grid
 import yaml
-from diffusers.loaders.lora_base import (_best_guess_weight_name)  # watch out for potetential removal from diffusers
+# from diffusers.loaders.lora_base import (_best_guess_weight_name)  # watch out for potetential removal from diffusers
+try:
+    from diffusers.loaders.lora_base import _best_guess_weight_name
+except ImportError:
+    from diffusers.loaders.lora_base import LoraBaseMixin
+    _best_guess_weight_name = LoraBaseMixin._best_guess_weight_name
 from einops import rearrange
 from huggingface_hub import snapshot_download
 from remote_pdb import RemotePdb

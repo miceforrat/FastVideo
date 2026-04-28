@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 from flash_attn import flash_attn_func as flash_attn_2_func
 from dataclasses import dataclass
+import inspect
+
 
 try:
     from fastvideo.attention.utils.flash_attn_cute import flash_attn_func
@@ -93,6 +95,7 @@ class FlashAttentionImpl(AttentionImpl):
     ) -> None:
         self.causal = causal
         self.softmax_scale = softmax_scale
+        self.no_mask_varlen = extra_impl_args.get("no_mask_varlen", False)
 
     def forward(
         self,
@@ -152,11 +155,56 @@ class FlashAttentionImpl(AttentionImpl):
             attn_mask = F.pad(attn_mask, (qkv.shape[1] - attn_mask.shape[1], 0), value=True)
             output = flash_attn_no_pad(qkv, attn_mask, causal=False, dropout_p=0, softmax_scale=None)
         else:
-            output = flash_attn_func(
-                query,  # type: ignore[no-untyped-call]
-                key,
-                value,
-                softmax_scale=self.softmax_scale,
-                causal=self.causal,
-            )
+            from flash_attn import flash_attn_varlen_func
+            if self.no_mask_varlen:
+                # query/key/value: [B, S, H, D]
+                B, Sq, Hq, D = query.shape
+                Bk, Sk, Hk, Dk = key.shape
+
+                if B != Bk or D != Dk:
+                    raise ValueError(
+                        f"Invalid q/k shape for varlen flash attention: "
+                        f"query={tuple(query.shape)}, key={tuple(key.shape)}"
+                    )
+
+                q_unpad = query.contiguous().view(B * Sq, Hq, D)
+                k_unpad = key.contiguous().view(B * Sk, Hk, D)
+                v_unpad = value.contiguous().view(B * Sk, Hk, D)
+
+                cu_seqlens_q = torch.arange(
+                    0,
+                    (B + 1) * Sq,
+                    step=Sq,
+                    device=query.device,
+                    dtype=torch.int32,
+                )
+                cu_seqlens_k = torch.arange(
+                    0,
+                    (B + 1) * Sk,
+                    step=Sk,
+                    device=key.device,
+                    dtype=torch.int32,
+                )
+                out_unpad = flash_attn_varlen_func(
+                    q_unpad,
+                    k_unpad,
+                    v_unpad,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_seqlen_q=Sq,
+                    max_seqlen_k=Sk,
+                    dropout_p=0.0,
+                    softmax_scale=self.softmax_scale,
+                    causal=self.causal,
+                )
+
+                output = out_unpad.view(B, Sq, Hq, D)
+            else:
+                output = flash_attn_func(
+                    query,  # type: ignore[no-untyped-call]
+                    key,
+                    value,
+                    softmax_scale=self.softmax_scale,
+                    causal=self.causal,
+                )
         return output

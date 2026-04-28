@@ -475,7 +475,8 @@ class VideoGenerator:
             "kv_cache_mib": output_batch.extra.get("kv_cache_mib"),
             "crossattn_mib": output_batch.extra.get("crossattn_mib"),
             "outer": output_batch.extra.get("outer", []),
-            "chunkwise": output_batch.extra.get("chunkwise", [])
+            "chunkwise": output_batch.extra.get("chunkwise", []),
+            "module_profiles_dict": output_batch.extra.get("module_profiles_dict", {})
         }
 
         return result

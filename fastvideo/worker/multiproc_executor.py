@@ -141,15 +141,19 @@ class MultiprocExecutor(Executor):
                                     extra=extra)
         outer_results = []
         chunkwise_results = []
+        module_dict_res = {}
         for i in range(len(responses)):
             rank_extra = responses[i].get("extra", {})
             if "outer" in rank_extra.keys():
                 outer_results.append(rank_extra["outer"])
             if "chunkwise" in rank_extra.keys():
                 chunkwise_results.append(rank_extra["chunkwise"])
+            if "module_profiles_dict" in rank_extra.keys():
+                module_dict_res[i] = rank_extra["module_profiles_dict"]
 
         result_batch.extra["outer"]=outer_results
         result_batch.extra["chunkwise"]=chunkwise_results
+        result_batch.extra["module_profiles_dict"] = module_dict_res
         return result_batch
 
     def execute_streaming_reset(self, forward_batch: ForwardBatch, fastvideo_args: FastVideoArgs) -> dict[str, Any]:

@@ -22,11 +22,11 @@
 
 from fastvideo.profiling.hack_transformer_block import (
     HackCausalWanTransformerBlock,
-    warmup_iters,
 )
 from fastvideo.models.dits.causal_wanvideo import AttentionBackendEnum
 from fastvideo.forward_context import set_forward_context
 from fastvideo.utils import set_mixed_precision_policy
+from fastvideo.profiling.small_node_profiler import get_current_simple_profiler
 
 import torch
 from torch.distributed.fsdp import MixedPrecisionPolicy
@@ -44,8 +44,9 @@ BS = 1
 DEVICE = "cuda:0"
 DTYPE = torch.bfloat16
 NUM_HEADS=12
-HEAD_DIM = 128
+HEAD_DIM=128
 DIM = NUM_HEADS* HEAD_DIM
+from fastvideo.attention.selector import  global_force_attn_backend
 
 def build_block():
     block = HackCausalWanTransformerBlock(
@@ -163,6 +164,7 @@ def build_chunk_inputs(
         crossattn_cache=crossattn_cache,
         current_start=current_start,
         cache_start=cache_start,
+        original_seq_len=seq_len,
     )
 
 
@@ -219,18 +221,38 @@ def profile_ar_diffusion_once(block, encoder_hidden_states, kv_cache, crossattn_
         outputs.append(out)
 
         # 模拟该 chunk forward 后，kv cache 有效长度推进到本 chunk 结束
-        new_end = current_start + seq_len
-        kv_cache["global_end_index"].fill_(new_end)
-        kv_cache["local_end_index"].fill_(new_end)
-
+        # new_end = current_start + seq_len
+        # kv_cache["global_end_index"].fill_(new_end)
+        # kv_cache["local_end_index"].fill_(new_end)
+        # print()
         start_index += frames
         chunk_id+=1
 
     return outputs
 
+from fastvideo.distributed import init_distributed_environment, initialize_model_parallel
+import os
+os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+os.environ.setdefault("MASTER_PORT", "29501")
+
+distributed_init_method = "tcp://127.0.0.1:29501"
 
 @torch.no_grad()
 def main():
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        distributed_init_method=distributed_init_method,
+    )
+    # torch.backends.cuda.enable_flash_sdp(False)
+    # torch.backends.cuda.enable_mem_efficient_sdp(True)
+    # global_force_attn_backend(AttentionBackendEnum.TORCH_SDPA)
+
+    initialize_model_parallel(
+        tensor_model_parallel_size=1,
+        sequence_model_parallel_size=1,
+    )
     param_dtype = torch.bfloat16
     reduce_dtype = torch.float32
     output_dtype = None
@@ -258,7 +280,7 @@ def main():
     encoder_hidden_states = static_inputs["encoder_hidden_states"]
     kv_cache = static_inputs["kv_cache"]
     crossattn_cache = static_inputs["crossattn_cache"]
-
+    warmup_iters = 5
     # warmup
     for _ in range(warmup_iters):
         kv_cache["global_end_index"].zero_()
@@ -266,14 +288,16 @@ def main():
         _ = profile_ar_diffusion_once(
             block, encoder_hidden_states, kv_cache, crossattn_cache
         )
+    print("warmup finished!!!")
 
-    torch.cuda.synchronize()
+    # torch.cuda.synchronize()
 
     # 正式 profile
 
-    s = torch.cuda.Event(enable_timing=True)
-    e = torch.cuda.Event(enable_timing=True)
-    s.record()
+    # s = torch.cuda.Event(enable_timing=True)
+    # e = torch.cuda.Event(enable_timing=True)
+    # s.record()
+    get_current_simple_profiler().set_nvtx_profiling(True)
     for i in range(1):
         # print(f"\n===== profile iter {i} =====")
         kv_cache["global_end_index"].zero_()
@@ -281,7 +305,7 @@ def main():
         outputs = profile_ar_diffusion_once(
             block, encoder_hidden_states, kv_cache, crossattn_cache
         )
-    e.record()
+    # e.record()
     torch.cuda.synchronize()
     
     last_out = outputs[-1]
@@ -292,7 +316,7 @@ def main():
     print("last output device:", last_out.device)
     print("final kv global_end:", kv_cache["global_end_index"].item())
     print("final kv local_end:", kv_cache["local_end_index"].item())
-    print(f"fwd time: {s.elapsed_time(e)}")
+    # print(f"fwd time: {s.elapsed_time(e)}")
 
 
 if __name__ == "__main__":

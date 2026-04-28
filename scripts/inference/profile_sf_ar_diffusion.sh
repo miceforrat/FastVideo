@@ -3,7 +3,7 @@ set -e
 
 SCRIPT="examples/inference/profiling/basic_self_forcing_causal_profiling.py"
 
-LOG_DIR=logs/profiling_details
+LOG_DIR=logs/advanced_profiling
 mkdir -p "$LOG_DIR"
 
 for num_gpus in 4 2 1; do
