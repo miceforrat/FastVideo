@@ -34,6 +34,8 @@ env
 *.log
 weights/
 logs/
+plots/
+images/
 
 # SSIM test outputs
 fastvideo/tests/ssim/generated_videos/
@@ -92,3 +94,5 @@ preprocess_output_text/
 .sisyphus/
 openspec/
 fastvideo/tests/ssim/reference_videos/**
+
+*.csv

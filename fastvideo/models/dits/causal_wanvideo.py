@@ -533,16 +533,27 @@ class CausalWanTransformerBlock(nn.Module):
         get_current_simple_profiler().exit()
         
         attn_output = attn_output.flatten(2)
-        get_current_simple_profiler().enter("to_out")
+        get_current_simple_profiler().enter("sa_to_out")
         attn_output, _ = self.to_out(attn_output)
         get_current_simple_profiler().exit()
         attn_output = attn_output.squeeze(1)
 
-        null_shift = null_scale = torch.tensor([0], device=hidden_states.device)
+        get_current_simple_profiler().enter("attn_null_tensor")
+        null_shift = null_scale = hidden_states.new_zeros(1)
+        get_current_simple_profiler().exit()
+
+        get_current_simple_profiler().enter("attn_residual_norm")
         norm_hidden_states, hidden_states = self.self_attn_residual_norm(
-            hidden_states, attn_output, gate_msa, null_shift, null_scale)
-        norm_hidden_states, hidden_states = norm_hidden_states.to(
-            orig_dtype), hidden_states.to(orig_dtype)
+            hidden_states, attn_output, gate_msa, null_shift, null_scale
+        )
+        get_current_simple_profiler().exit()
+
+        get_current_simple_profiler().enter("attn_dtype_cast")
+        if norm_hidden_states.dtype != orig_dtype:
+            norm_hidden_states = norm_hidden_states.to(orig_dtype)
+        if hidden_states.dtype != orig_dtype:
+            hidden_states = hidden_states.to(orig_dtype)
+        get_current_simple_profiler().exit()
 
         get_current_simple_profiler().exit()
         

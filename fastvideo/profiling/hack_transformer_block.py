@@ -144,8 +144,9 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
         self.layer_idx = int(prefix.split(".")[-1])
         self.fwd_times=0
         self.iter_fwds=7 * 4 # chunk nums * timesteps
-        if self.layer_idx > 30 or self.layer_idx < 30:
-            self.profile_time=True
+        self.profile_time=True
+        # if self.layer_idx > 30 or self.layer_idx < 30:
+        #     self.profile_time=True
             
 
     def _new_timer_events(self) -> dict[str, TimeProfilingEvent]:
@@ -237,9 +238,9 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
         # self.warmup_fwds = warmup_iters * self.iter_fwds
         # do_profile = self.fwd_times >= self.warmup_fwds and self.fwd_times < self.warmup_fwds+profile_times
 
-        do_profile = get_global_time_profiler().time_profile
+        # do_profile = get_global_time_profiler().time_profile
         # 只有这个块及其内部的算子开启profile
-        get_global_time_profiler().set_block_profiling(do_profile and self.profile_time)
+        # get_global_time_profiler().set_block_profiling(do_profile and self.profile_time)
         orig_profile_setup = get_current_simple_profiler().do_module_profiling
         orig_nvtx_setup = get_current_simple_profiler().nvtx_profiling
         get_current_simple_profiler().set_module_profiling(orig_profile_setup and self.profile_time)
@@ -258,7 +259,7 @@ class HackCausalWanTransformerBlock(CausalWanTransformerBlock):
             current_start,
             cache_start,
         )
-        get_current_simple_profiler().exit()
+        get_current_simple_profiler().exit(sync_and_calc_durations=True)
         self.fwd_times += 1
         get_current_simple_profiler().set_module_profiling(orig_profile_setup)
         get_current_simple_profiler().set_nvtx_profiling(orig_nvtx_setup)

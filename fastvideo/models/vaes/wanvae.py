@@ -991,10 +991,15 @@ class WanDecoder3d(nn.Module):
         ## middle
         x = self.mid_block(x)
 
+        check_first = True
         ## upsamples
         for up_block in self.up_blocks:
-            x = up_block(x)
-
+            if check_first:
+                with torch.cuda.nvtx.range("wandecoder_3d_upblock"):
+                    x = up_block(x)
+                check_first=False
+            else:
+                x = up_block(x)
         ## head
         x = self.norm_out(x)
         x = self.nonlinearity(x)
@@ -1010,7 +1015,8 @@ class WanDecoder3d(nn.Module):
                         cache_x.device), cache_x
                 ],
                                     dim=2)
-            x = self.conv_out(x, _feat_cache[idx])
+            with torch.cuda.nvtx.range("wandecoder_3d_convout"):
+                x = self.conv_out(x, _feat_cache[idx])
             _feat_cache[idx] = cache_x
             _feat_idx += 1
             feat_cache.set(_feat_cache)
@@ -1193,6 +1199,7 @@ class AutoencoderKLWan(nn.Module, ParallelTiledVAE):
         if self.use_feature_cache:
             self.clear_cache()
             iter_ = z.shape[2]
+            print(f"iter: {iter_}")
             x = self.post_quant_conv(z)
             with forward_context(feat_cache_arg=self._feat_map,
                                  feat_idx_arg=self._conv_idx):
@@ -1200,10 +1207,12 @@ class AutoencoderKLWan(nn.Module, ParallelTiledVAE):
                     feat_idx.set(0)
                     if i == 0:
                         first_chunk.set(True)
-                        out = self.decoder(x[:, :, i:i + 1, :, :])
+                        with torch.cuda.nvtx.range("vae_decoder_only"):
+                            out = self.decoder(x[:, :, i:i + 1, :, :])
                     else:
                         first_chunk.set(False)
-                        out_ = self.decoder(x[:, :, i:i + 1, :, :])
+                        with torch.cuda.nvtx.range("vae_decoder_only"):
+                            out_ = self.decoder(x[:, :, i:i + 1, :, :])
                         out = torch.cat([out, out_], 2)
 
             if self.config.patch_size is not None:

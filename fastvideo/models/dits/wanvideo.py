@@ -97,6 +97,7 @@ class WanTimeTextImageEmbedding(nn.Module):
 
         return temb, timestep_proj, encoder_hidden_states, encoder_hidden_states_image
 
+from fastvideo.profiling.small_node_profiler import get_current_simple_profiler
 
 class WanSelfAttention(nn.Module):
 
@@ -159,7 +160,13 @@ class WanT2VCrossAttention(WanSelfAttention):
         b, n, d = x.size(0), self.num_heads, self.head_dim
 
         # compute query, key, value
-        q = self.norm_q(self.to_q(x)[0]).view(b, -1, n, d)
+        get_current_simple_profiler().enter("cross_attn_norm_q_to_q")
+        get_current_simple_profiler().enter("cross_attn_to_q")
+        x_q = self.to_q(x)[0]
+        get_current_simple_profiler().exit()        
+        x_q_normed = self.norm_q(x_q)
+        q = x_q_normed.view(b, -1, n, d)
+        get_current_simple_profiler().exit()
 
         if crossattn_cache is not None:
             if not crossattn_cache["is_init"]:

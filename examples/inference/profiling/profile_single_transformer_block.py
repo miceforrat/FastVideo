@@ -44,14 +44,18 @@ BS = 1
 DEVICE = "cuda:0"
 DTYPE = torch.bfloat16
 NUM_HEADS=12
+# NUM_HEADS=40
 HEAD_DIM=128
-DIM = NUM_HEADS* HEAD_DIM
+DIM = NUM_HEADS * HEAD_DIM
+FFN_DIM=8960
+# FFN_DIM=13824
+
 from fastvideo.attention.selector import  global_force_attn_backend
 
 def build_block():
     block = HackCausalWanTransformerBlock(
         dim=DIM,
-        ffn_dim=8960,
+        ffn_dim=FFN_DIM,
         num_heads=NUM_HEADS,
         local_attn_size=-1,
         sink_size=0,
@@ -151,8 +155,8 @@ def build_chunk_inputs(
     block_mask = None
 
     # 在进入本 chunk 前，cache 的有效长度应当等于 current_start
-    kv_cache["global_end_index"].fill_(current_start)
-    kv_cache["local_end_index"].fill_(current_start)
+    # kv_cache["global_end_index"].fill_(current_start)
+    # kv_cache["local_end_index"].fill_(current_start)
 
     return dict(
         hidden_states=hidden_states,
@@ -283,8 +287,8 @@ def main():
     warmup_iters = 5
     # warmup
     for _ in range(warmup_iters):
-        kv_cache["global_end_index"].zero_()
-        kv_cache["local_end_index"].zero_()
+        # kv_cache["global_end_index"].zero_()
+        # kv_cache["local_end_index"].zero_()
         _ = profile_ar_diffusion_once(
             block, encoder_hidden_states, kv_cache, crossattn_cache
         )
@@ -298,10 +302,11 @@ def main():
     # e = torch.cuda.Event(enable_timing=True)
     # s.record()
     get_current_simple_profiler().set_nvtx_profiling(True)
+    get_current_simple_profiler().set_module_profiling(True)
     for i in range(1):
         # print(f"\n===== profile iter {i} =====")
-        kv_cache["global_end_index"].zero_()
-        kv_cache["local_end_index"].zero_()
+        # kv_cache["global_end_index"].zero_()
+        # kv_cache["local_end_index"].zero_()
         outputs = profile_ar_diffusion_once(
             block, encoder_hidden_states, kv_cache, crossattn_cache
         )

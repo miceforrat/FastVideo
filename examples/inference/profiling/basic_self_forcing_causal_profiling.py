@@ -14,100 +14,11 @@ from copy import deepcopy
 from fastvideo.profiling.time_profiler import get_global_time_profiler
 
 import fastvideo.profiling.hack_transformer_block
-from collections import defaultdict
 
-def explore_node_dict(root: dict):
-    stats = defaultdict(lambda: {
-        "durations": [],
-        "input_shapes": [],
-        "output_shapes": [],
-        "meta": []
-    })
-    def dfs(node: dict, path: tuple[str, ...]):
-        name = node["name"]
-        cur_path = path + (name,)
-        key = "->".join(cur_path)
-
-        stats[key]["durations"].append(node.get("duration_ms", 0))
-        input_shapes = node.get("input_shapes")
-        if input_shapes is not None and input_shapes!= {}:
-            stats[key]["input_shapes"].append(input_shapes)
-        output_shapes = node.get("output_shapes")
-        if output_shapes is not None and output_shapes!= {}:
-            stats[key]["output_shapes"].append(output_shapes)
-        meta = node.get("meta")
-        if meta is not None and output_shapes != {}:
-            stats[key]["meta"].append(meta)
-        # stats[key]["nodes"].append(node)
-
-        sub_nodes = node.get("sub_nodes", {})
-        for sub_name, nodes in sub_nodes.items():
-            for child in nodes:
-                dfs(child, cur_path)
-
-    dfs(root, ())
-    return stats
+from fastvideo.profiling.data_analysis import summarize_multi_rank_stats,explore_node_dict, expand_summary_with_stats
 
 from statistics import mean
 
-def summarize_multi_rank_stats(rank_stats: list[dict]):
-    merged = defaultdict(lambda: {
-        "durations": [],
-        "input_shapes": [],
-        "output_shapes": [],
-        "meta": [],
-    })
-
-    # merge across ranks
-    for stats in rank_stats:
-        for chain, item in stats.items():
-            merged[chain]["durations"].extend(item.get("durations", []))
-            merged[chain]["input_shapes"].extend(item.get("input_shapes", []))
-            merged[chain]["output_shapes"].extend(item.get("output_shapes", []))
-            merged[chain]["meta"].extend(item.get("meta", []))
-
-    # summarize
-    summary = {}
-
-    for chain, item in merged.items():
-        durations = item["durations"]
-
-        summary[chain] = {
-            "count": len(durations),
-            "duration_avg_ms": mean(durations) if durations else None,
-
-            # 不做平均，直接列出所有 rank / all calls 的观测
-            "input_shapes": item["input_shapes"],
-            "output_shapes": item["output_shapes"],
-            "meta": item["meta"],
-        }
-
-    return summary
-
-def expand_summary_with_stats(summary: dict) -> dict:
-    root = {
-        "name": "stat_root",
-        "sub_nodes": {},
-    }
-
-    for chain, stats in summary.items():
-        names = chain.split("->") if isinstance(chain, str) else list(chain)
-
-        cur = root
-        for name in names:
-            sub_nodes = cur.setdefault("sub_nodes", {})
-
-            if name not in sub_nodes:
-                sub_nodes[name] = {
-                    "name": name,
-                    "sub_nodes": {},
-                }
-
-            cur = sub_nodes[name]
-
-        # 关键：直接挂 stats，不动原有字段
-        cur["stats"] = stats
-    return root
 
 def print_excelwise_data(all_stats:dict):
     
@@ -125,7 +36,7 @@ def print_excelwise_data(all_stats:dict):
     print("\t".join([str(outer_val) for outer_val in outer_vals]))
     
     denoising_chunks = pipeline_wise_stats["sub_nodes"]["CausalDMDDenosingStage"]["sub_nodes"]
-    labels = ["chunk_idx", "dit_fwd", "sharding", "blocks", "all2gather", \
+    labels = ["chunk_idx", "chunk_fwd", "dit_fwd", "sharding", "blocks", "all2gather", \
             "block_total", "prepare", "self_attn", "cross_attn_core", "ffn",\
             "fc_in", "act", "fc_out", \
             "hs_norm", "to_q", "to_k", "to_v", "q_rms_norm", "core_attn", "to_out", \
@@ -137,6 +48,7 @@ def print_excelwise_data(all_stats:dict):
         res = []
         chunk_idx = chunk_name.split("_")[-1]
         res.append(chunk_idx)
+        res.append(chunk_stats["stats"]["duration_avg_ms"])
         res.append(chunk_stats["sub_nodes"]["dit_forward"]["stats"]["duration_avg_ms"])
         dit_sons = chunk_stats["sub_nodes"]["dit_forward"]["sub_nodes"]
         res.append(dit_sons["model_sharding"]["stats"]["duration_avg_ms"])
@@ -207,7 +119,7 @@ def main():
     parser.add_argument(
         "--bs",
         type=int,
-        choices=[1, 2, 4, 8],
+        choices=[1, 2,3, 4, 8],
         default=1,
         help="Batch size"
     )
@@ -235,7 +147,7 @@ def main():
         text_encoder_cpu_offload=True,
         dit_layerwise_offload=False,
         dit_cpu_offload=False,
-        vae_cpu_offload=True,
+        vae_cpu_offload=False,
         log_kv_cache_size=True,
         dp_decoding=True
     )
@@ -247,18 +159,19 @@ def main():
     "natural light filtering through the petals. Mid-shot, warm and cheerful tones."
     prompts = [fake_prompt] * 2
     module_profiling = False
+    nvtx_profiling=True
     bs = args.bs
     warmup_iters = 5
     for _ in range(warmup_iters):
         results = generator.generate_video(fake_prompt, output_path=OUTPUT_PATH, \
             save_video=False, sampling_param=sampling_param, num_videos_per_prompt=bs)
     
-    run_times = 5
+    run_times = 1
     gen_images_cnt = 8
     # assert run_times % chunk_size == 0
-    assert gen_images_cnt % bs == 0
+    # assert gen_images_cnt % bs == 0
     
-    video_gen_times = gen_images_cnt // bs
+    video_gen_times = 1
     
     all_stage_durations = []
     full_durations = []
@@ -275,7 +188,7 @@ def main():
         for j in range(video_gen_times):
             results = generator.generate_video(fake_prompt, output_path=OUTPUT_PATH, save_video=False, \
                 sampling_param=sampling_param, num_videos_per_prompt=bs, do_profiling=module_profiling,\
-                    memory_snapshot=False, nvtx_profiling=False)
+                    memory_snapshot=False, nvtx_profiling=nvtx_profiling)
 
             generate_times.append(results["generation_time"])
             peak_memory_mbs.append(results["peak_memory_mb"])
@@ -291,7 +204,8 @@ def main():
     avg_full_duration = mean(full_durations)
     avg_peak_memory_mb = mean(peak_memory_mbs)
     avg_gen_time = mean(generate_times)
-    avg_video_thpt = gen_images_cnt / avg_full_duration
+    # avg_video_thpt = gen_images_cnt / avg_full_duration
+    avg_video_thpt = video_gen_times* bs / avg_full_duration 
     print("full_time\tvideo_thpt\tgen_time\tpeak_memory_mib")
     print(f"{avg_full_duration}\t{avg_video_thpt}\t{avg_gen_time}\t{avg_peak_memory_mb}")
     

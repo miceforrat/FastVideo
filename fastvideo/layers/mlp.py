@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from fastvideo.layers.activation import get_act_fn
 from fastvideo.layers.linear import ReplicatedLinear
-
+from fastvideo.profiling.small_node_profiler import get_current_simple_profiler
 
 class MLP(nn.Module):
     """
@@ -35,7 +35,9 @@ class MLP(nn.Module):
         self.fc_out = ReplicatedLinear(mlp_hidden_dim, output_dim, bias=bias, params_dtype=dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        get_current_simple_profiler().enter("fc_in")
         x, _ = self.fc_in(x)
+        get_current_simple_profiler().exit()
         x = self.act(x)
         x, _ = self.fc_out(x)
         return x

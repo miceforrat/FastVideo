@@ -155,8 +155,9 @@ class FlashAttentionImpl(AttentionImpl):
             attn_mask = F.pad(attn_mask, (qkv.shape[1] - attn_mask.shape[1], 0), value=True)
             output = flash_attn_no_pad(qkv, attn_mask, causal=False, dropout_p=0, softmax_scale=None)
         else:
-            from flash_attn import flash_attn_varlen_func
             if self.no_mask_varlen:
+                from flash_attn import flash_attn_varlen_func
+                
                 # query/key/value: [B, S, H, D]
                 B, Sq, Hq, D = query.shape
                 Bk, Sk, Hk, Dk = key.shape
