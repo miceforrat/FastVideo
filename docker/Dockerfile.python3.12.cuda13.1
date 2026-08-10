@@ -1,0 +1,122 @@
+FROM nvidia/cuda:13.1.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+SHELL ["/bin/bash", "-c"]
+
+WORKDIR /FastVideo
+
+
+# ============================================================
+# System packages
+# ============================================================
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    git \
+    ca-certificates \
+    openssh-server \
+    zsh \
+    vim \
+    curl \
+    gcc-11 \
+    g++-11 \
+    clang-11 \
+    build-essential \
+    python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 \
+    --slave /usr/bin/g++ g++ /usr/bin/g++-11
+
+
+
+# ============================================================
+# CUDA
+# ============================================================
+
+ENV CUDA_HOME=/usr/local/cuda
+
+ENV PATH=${CUDA_HOME}/bin:${PATH}
+
+ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
+
+
+
+# ============================================================
+# uv
+# ============================================================
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    echo 'source $HOME/.local/bin/env' >> /root/.bashrc
+
+
+
+# ============================================================
+# Python env
+# ============================================================
+
+COPY pyproject.toml ./
+
+
+RUN echo "# Placeholder" > README.md
+
+
+RUN source $HOME/.local/bin/env && \
+    uv venv --python 3.12 --seed /opt/venv
+
+
+
+# ============================================================
+# PyTorch CUDA 13
+# ============================================================
+
+RUN source $HOME/.local/bin/env && \
+    source /opt/venv/bin/activate && \
+    uv pip install --upgrade pip
+
+
+# CUDA 13.0 PyTorch backend
+ENV UV_TORCH_BACKEND=cu130
+
+
+RUN source $HOME/.local/bin/env && \
+    source /opt/venv/bin/activate && \
+    uv pip install \
+        torch==2.11.0 \
+        torchvision==0.26.0 \
+        torchaudio==2.11.0
+
+
+
+# ============================================================
+# FastVideo
+# ============================================================
+
+COPY . .
+
+
+RUN source $HOME/.local/bin/env && \
+    source /opt/venv/bin/activate && \
+    uv pip install -e .[dev]
+
+
+RUN echo 'source /opt/venv/bin/activate' >> /root/.bashrc
+
+
+
+# ============================================================
+# Verify
+# ============================================================
+
+RUN nvcc --version && \
+    /opt/venv/bin/python - <<EOF
+import torch
+print("torch:", torch.__version__)
+print("torch cuda:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+EOF
+
+
+CMD ["/bin/bash"]

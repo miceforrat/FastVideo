@@ -96,3 +96,7 @@ openspec/
 fastvideo/tests/ssim/reference_videos/**
 
 *.csv
+
+green+pytorch_demo/*.so
+green+pytorch_demo/*.txt
+green+pytorch_demo/build

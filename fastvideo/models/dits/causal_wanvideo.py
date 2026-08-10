@@ -587,6 +587,11 @@ class CausalWanTransformer3DModel(BaseDiT):
 
     def __init__(self, config: WanVideoConfig, hf_config: dict[str,
                                                                Any]) -> None:
+
+        # from dataclasses import asdict
+        # print("init dit......")
+        # print(asdict(config))
+        # print(hf_config)
         super().__init__(config=config, hf_config=hf_config)
 
         inner_dim = config.num_attention_heads * config.attention_head_dim
@@ -708,6 +713,62 @@ class CausalWanTransformer3DModel(BaseDiT):
 
         return block_mask
     
+    def debug_cache(self, name, obj, max_items=3):
+        print(f"\n===== {name} =====")
+        print("type:", type(obj))
+
+        if obj is None:
+            print("None")
+            return
+
+        if torch.is_tensor(obj):
+            print("tensor shape:", obj.shape)
+            print("dtype:", obj.dtype)
+            print("device:", obj.device)
+            return
+
+        if isinstance(obj, dict):
+            print("dict keys:", list(obj.keys())[:max_items])
+            for k, v in list(obj.items())[:max_items]:
+                print(f"[{k}]")
+                if torch.is_tensor(v):
+                    print("  tensor:", v.shape, v.dtype)
+                else:
+                    print("  type:", type(v))
+            return
+
+        if isinstance(obj, (list, tuple)):
+            print("length:", len(obj))
+            for i, item in enumerate(obj[:max_items]):
+                print(f"[{i}] type:", type(item))
+
+                if torch.is_tensor(item):
+                    print("  tensor:", item.shape, item.dtype)
+
+                elif isinstance(item, (list, tuple)):
+                    print("  sub length:", len(item))
+                    for j, sub in enumerate(item[:max_items]):
+                        if torch.is_tensor(sub):
+                            print(
+                                f"    [{j}] tensor:",
+                                sub.shape,
+                                sub.dtype
+                            )
+                        else:
+                            print(
+                                f"    [{j}] type:",
+                                type(sub)
+                            )
+
+                elif isinstance(item, dict):
+                    print("  keys:", list(item.keys())[:max_items])
+
+                else:
+                    print("  value type:", type(item))
+            return
+
+        print("value:", obj)
+
     def _forward_inference(
                 self,
                 hidden_states: torch.Tensor,
@@ -727,6 +788,87 @@ class CausalWanTransformer3DModel(BaseDiT):
         This function will be run for num_frame times.
         Process the latent frames one by one (1560 tokens each)
         """
+
+
+        # # =====================================================
+        # # forward debug
+        # # =====================================================
+
+        # print("\n==============================")
+        # print("Wan Causal Forward Debug")
+        # print("==============================")
+
+
+        # print(
+        #     "hidden_states:",
+        #     hidden_states.shape,
+        #     hidden_states.dtype,
+        #     hidden_states.device
+        # )
+
+
+        # if isinstance(encoder_hidden_states, list):
+        #     print(
+        #         "encoder_hidden_states:",
+        #         len(encoder_hidden_states),
+        #         encoder_hidden_states[0].shape,
+        #         encoder_hidden_states[0].dtype
+        #     )
+        # else:
+        #     print(
+        #         "encoder_hidden_states:",
+        #         encoder_hidden_states.shape,
+        #         encoder_hidden_states.dtype
+        #     )
+
+
+        # print(
+        #     "timestep:",
+        #     timestep.shape,
+        #     timestep.dtype
+        # )
+
+
+        # if encoder_hidden_states_image is None:
+        #     print("encoder_hidden_states_image: None")
+        # elif isinstance(encoder_hidden_states_image, list):
+        #     print(
+        #         "encoder_hidden_states_image:",
+        #         len(encoder_hidden_states_image),
+        #         encoder_hidden_states_image[0].shape,
+        #         encoder_hidden_states_image[0].dtype
+        #     )
+        # else:
+        #     print(
+        #         "encoder_hidden_states_image:",
+        #         encoder_hidden_states_image.shape,
+        #         encoder_hidden_states_image.dtype
+        #     )
+
+
+        # self.debug_cache("kv_cache", kv_cache)
+
+        # self.debug_cache("crossattn_cache", crossattn_cache)
+
+
+        # print("\n===== position =====")
+        # print("current_start:", current_start)
+        # print("cache_start:", cache_start)
+        # print("start_frame:", start_frame)
+
+
+        # print("\n===== model =====")
+        # print("num layers:", len(self.blocks))
+        # print("hidden size:", self.hidden_size)
+        # print("num heads:", self.num_attention_heads)
+        # print(
+        #     "head dim:",
+        #     self.hidden_size // self.num_attention_heads
+        # )
+        # print("patch size:", self.patch_size)
+
+        # print("==============================\n")
+
         orig_dtype = hidden_states.dtype
         if not isinstance(encoder_hidden_states, torch.Tensor):
             encoder_hidden_states = encoder_hidden_states[0]
