@@ -99,4 +99,6 @@ fastvideo/tests/ssim/reference_videos/**
 
 green+pytorch_demo/*.so
 green+pytorch_demo/*.txt
+green+pytorch_demo/*.nsys-rep
+green+pytorch_demo/*.sqlite
 green+pytorch_demo/build
