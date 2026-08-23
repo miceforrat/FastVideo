@@ -375,3 +375,19 @@ print(
     "speedup:",
     baseline / parallel
 )
+
+
+#   nsys profile \
+#     --trace=cuda,nvtx,osrt,cudnn,cublas \
+#     --sample=none \
+#     --cpuctxsw=none \
+#     -o green+pytorch_demo/fake_vae_dit \
+#     /opt/venv/bin/python \
+#     green+pytorch_demo/fake_vae_dit_testbench.py \
+#     --dit-sms 112 \
+#     --fake-kernel-ms 25 \
+#     --fake-kernels 80 \
+#     --fake-blocks-per-sm 1 \
+#     --fake-threads 256 \
+#     --warmup-iters 3 \
+#     --profile-iters 3

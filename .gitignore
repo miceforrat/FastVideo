@@ -102,3 +102,11 @@ green+pytorch_demo/*.txt
 green+pytorch_demo/*.nsys-rep
 green+pytorch_demo/*.sqlite
 green+pytorch_demo/build
+
+green+pytorch_demo/**/*.nsys-rep
+green+pytorch_demo/**/*.sqlite
+green+pytorch_demo/**/*.ncu-rep
+green+pytorch_demo/**/*.qdrep
+green+pytorch_demo/**/*.nsys-analysis
+green+pytorch_demo/logs/
+green+pytorch_demo/__pycache__/

@@ -14,12 +14,14 @@ public:
 
     GreenContextWrapper(
         int dit_sms,
-        int device
+        int device,
+        bool ignore_sm_coscheduling
     )
     {
         ctx_ = std::make_shared<GreenContextManager>(
             dit_sms,
-            device
+            device,
+            ignore_sm_coscheduling
         );
     }
 
@@ -58,9 +60,10 @@ PYBIND11_MODULE(
 
 
     .def(
-        py::init<int,int>(),
+        py::init<int,int,bool>(),
         py::arg("dit_sms"),
-        py::arg("device")=0
+        py::arg("device")=0,
+        py::arg("ignore_sm_coscheduling")=false
     )
 
 

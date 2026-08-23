@@ -11,7 +11,8 @@ public:
     GreenContextManager(
         // 实际上是指定dit的资源数量，剩余的资源即为VAE所有
         int dit_sms,
-        int device = 0
+        int device = 0,
+        bool ignore_sm_coscheduling = false
     );
 
 
@@ -27,7 +28,8 @@ public:
 private:
 
     void init_resources(
-        int dit_sms
+        int dit_sms,
+        bool ignore_sm_coscheduling
     );
 
 

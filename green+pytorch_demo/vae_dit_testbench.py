@@ -41,6 +41,9 @@ from fastvideo.models.vaes.wanvae import (
     feat_idx,
 )
 
+# torch.backends.cuda.enable_flash_sdp(False)
+# torch.backends.cuda.enable_mem_efficient_sdp(False)
+# torch.backends.cuda.enable_math_sdp(True)
 
 
 # ============================================================

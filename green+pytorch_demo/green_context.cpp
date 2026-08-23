@@ -26,7 +26,8 @@ do {                                                        \
 
 GreenContextManager::GreenContextManager(
     int dit_sms,
-    int device
+    int device,
+    bool ignore_sm_coscheduling
 )
 :
     device_(device),
@@ -42,7 +43,8 @@ GreenContextManager::GreenContextManager(
 
 
         init_resources(
-            dit_sms
+            dit_sms,
+            ignore_sm_coscheduling
         );
 
 
@@ -94,7 +96,8 @@ GreenContextManager::~GreenContextManager()
 
 
 void GreenContextManager::init_resources(
-    int dit_sms
+    int dit_sms,
+    bool ignore_sm_coscheduling
 )
 {
 
@@ -119,8 +122,22 @@ void GreenContextManager::init_resources(
     );
 
 
+    if (dit_sms <= 0 ||
+        static_cast<unsigned int>(dit_sms) >= total_resource_.sm.smCount)
+    {
+        throw std::invalid_argument(
+            "dit_sms must be greater than 0 and smaller than the total SM count"
+        );
+    }
+
+
     // Step 2
     unsigned int groups = 1;
+
+
+    const unsigned int split_flags = ignore_sm_coscheduling
+        ? CU_DEV_SM_RESOURCE_SPLIT_IGNORE_SM_COSCHEDULING
+        : 0U;
 
 
     CU_CHECK(
@@ -129,10 +146,32 @@ void GreenContextManager::init_resources(
             &groups,
             &total_resource_,
             &vae_resource_,
-            0,
-            dit_sms
+            split_flags,
+            static_cast<unsigned int>(dit_sms)
         )
     );
+
+
+    if (groups != 1)
+    {
+        throw std::runtime_error(
+            "cuDevSmResourceSplitByCount did not create exactly one DiT group"
+        );
+    }
+
+
+    std::cout
+        << "Green Context SM split: requested_dit="
+        << dit_sms
+        << ", actual_dit="
+        << dit_resource_.sm.smCount
+        << ", actual_vae="
+        << vae_resource_.sm.smCount
+        << ", total="
+        << total_resource_.sm.smCount
+        << ", ignore_sm_coscheduling="
+        << (ignore_sm_coscheduling ? "true" : "false")
+        << std::endl;
 
 
     // Step 3
